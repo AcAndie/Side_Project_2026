@@ -14,9 +14,13 @@ PRIORITY ORDER (cắt từ ít quan trọng nhất):
   5. Active Characters  ← Bỏ chars phụ (giữ top 5 relevant)
   6. Staging Glossary   ← Bỏ khi rất tight
   7. Arc Memory hoàn toàn ← Last resort
+
+[v4.2] Character scoring dùng regex word-boundary thay vì str.count()
+       để tránh false match cho tên ngắn (vd: "Li" match vào "likely").
 """
 from __future__ import annotations
 
+import re
 import logging
 from dataclasses import dataclass, field
 
@@ -32,6 +36,25 @@ def estimate_tokens(text: str, lang: str = "vn") -> int:
     return max(1, int(len(text) / cpt))
 
 
+def _score_character_relevance(name: str, profile: str, chapter_text_lower: str) -> int:
+    """
+    Tính điểm liên quan của nhân vật với chương hiện tại.
+    Dùng regex lookaround thay vì str.count() để tránh false match tên ngắn.
+
+    Điểm = số lần xuất hiện có word-boundary + bonus 100 nếu không phải Archive.
+    """
+    try:
+        # Lookaround: không đi trước/sau bởi ký tự chữ-số
+        pattern = rf"(?<![a-zA-Z0-9_]){re.escape(name.lower())}(?![a-zA-Z0-9_])"
+        count   = len(re.findall(pattern, chapter_text_lower, re.IGNORECASE))
+    except re.error:
+        # Fallback an toàn nếu tên chứa ký tự đặc biệt
+        count = chapter_text_lower.count(name.lower())
+
+    archive_penalty = 0 if "[ARCHIVE]" not in profile else -50
+    return count + 100 + archive_penalty  # +100 để chars non-archive luôn > 0
+
+
 @dataclass
 class BudgetContext:
     # Không bao giờ cắt
@@ -41,7 +64,7 @@ class BudgetContext:
     context_notes     : str = ""
 
     # Có thể giảm
-    arc_memory_text  : str        = ""
+    arc_memory_text  : str        = field(default_factory=str)
     arc_entries_full : list[str]  = field(default_factory=list)
 
     # Có thể cắt bớt
@@ -103,15 +126,17 @@ def apply_budget(ctx: BudgetContext) -> BudgetContext:
         ch_lower = ctx.chapter_text.lower()
         scored   = sorted(
             ctx.char_profiles.items(),
-            key=lambda kv: ch_lower.count(kv[0].lower()) + (100 if "[ARCHIVE]" not in kv[1] else 0),
+            key=lambda kv: _score_character_relevance(kv[0], kv[1], ch_lower),
             reverse=True,
         )
-        keep = dict(scored[:5])
+        keep         = dict(scored[:5])
         dropped_text = "\n".join(p for n, p in ctx.char_profiles.items() if n not in keep)
-        saved = estimate_tokens(dropped_text)
+        saved        = estimate_tokens(dropped_text)
         ctx.char_profiles = keep
         total -= saved
-        print(f"  ✂️  [Budget] Bỏ {len(scored)-5} char profiles phụ (~{saved:,} tk)")
+        dropped_names = [n for n, _ in scored[5:]]
+        print(f"  ✂️  [Budget] Bỏ {len(dropped_names)} char profiles phụ (~{saved:,} tk): "
+              f"{', '.join(dropped_names[:3])}{'...' if len(dropped_names) > 3 else ''}")
         if total <= soft:
             return _log_final(ctx, total, soft)
 

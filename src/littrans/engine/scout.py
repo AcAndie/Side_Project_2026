@@ -7,6 +7,8 @@ Mỗi SCOUT_REFRESH_EVERY chương:
   3. [v4] Cập nhật emotional_state nhân vật
 
 Không raise — pipeline tiếp tục nếu Scout thất bại.
+
+[v4.2] Validate emotional_states là list + giá trị hợp lệ trước khi ghi DB.
 """
 from __future__ import annotations
 
@@ -65,6 +67,9 @@ Quy tắc:
 - "hurt"    : tổn thương, buồn — ảnh hưởng lời thoại
 - "changed" : vừa trải qua sự kiện lớn thay đổi nhận thức/mục tiêu
 - Chỉ nhân vật có tên rõ ràng và xuất hiện đáng kể. Tối đa 8 nhân vật."""
+
+_VALID_STATES     = {"normal", "angry", "hurt", "changed"}
+_VALID_INTENSITIES = {"low", "medium", "high"}
 
 
 # ── Public API ────────────────────────────────────────────────────
@@ -177,10 +182,24 @@ def _update_emotional_states(all_files: list[str], current_index: int) -> None:
 
     try:
         from littrans.llm.client import call_gemini_json
-        data   = call_gemini_json(_EMOTION_SYSTEM, user_msg)
-        states = data.get("emotional_states", [])
+        data = call_gemini_json(_EMOTION_SYSTEM, user_msg)
     except Exception as e:
         logging.error(f"Emotion extract: {e}")
+        return
+
+    # ── Validate response structure ───────────────────────────────
+    if not isinstance(data, dict):
+        logging.warning(f"[Emotion] Response không phải dict: {type(data)}")
+        return
+
+    states = data.get("emotional_states", [])
+
+    # Phòng trường hợp AI trả về string hoặc null thay vì list
+    if not isinstance(states, list):
+        logging.warning(
+            f"[Emotion] 'emotional_states' không phải list "
+            f"(got {type(states).__name__}: {str(states)[:80]}) — bỏ qua."
+        )
         return
 
     if not states:
@@ -202,16 +221,34 @@ def _update_emotional_states(all_files: list[str], current_index: int) -> None:
 
     # Cập nhật từ kết quả scout
     for entry in states:
-        char_name = entry.get("character", "").strip()
-        if not char_name:
+        # Validate từng entry
+        if not isinstance(entry, dict):
             continue
+
+        char_name = entry.get("character", "")
+        if not isinstance(char_name, str) or not char_name.strip():
+            continue
+        char_name = char_name.strip()
+
+        state     = entry.get("state", "normal")
+        intensity = entry.get("intensity", "medium")
+        reason    = entry.get("reason", "")
+
+        # Validate giá trị enum
+        if state not in _VALID_STATES:
+            logging.warning(f"[Emotion] '{char_name}' state='{state}' không hợp lệ → 'normal'")
+            state = "normal"
+        if intensity not in _VALID_INTENSITIES:
+            intensity = "medium"
+
         matched = next((n for n in chars if n.lower() == char_name.lower()), None)
         if not matched:
             continue
+
         chars[matched]["emotional_state"] = {
-            "current"            : entry.get("state", "normal"),
-            "intensity"          : entry.get("intensity", "medium"),
-            "reason"             : entry.get("reason", ""),
+            "current"            : state,
+            "intensity"          : intensity,
+            "reason"             : reason if isinstance(reason, str) else "",
             "last_chapter_index" : current_index,
         }
         updated += 1

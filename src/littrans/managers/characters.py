@@ -9,10 +9,14 @@ Tầng:
 [v4] Emotion Tracker:
   emotional_state: {current, intensity, reason, last_chapter_index}
   Scout cập nhật → prompt hiển thị ⚠️ warning khi state != normal
+
+[v4.2] Validate name + role trước khi lưu vào DB.
+[v4.2] _matches dùng lookaround thay vì \b để hỗ trợ Unicode tốt hơn.
 """
 from __future__ import annotations
 
 import re
+import logging
 import threading
 from copy import deepcopy
 
@@ -27,6 +31,11 @@ _EMOTION_DISPLAY = {
     "angry"  : ("TỨC GIẬN",    "Lời thoại có thể gay gắt, cộc cằn, mất kiểm soát"),
     "hurt"   : ("TỔN THƯƠNG",  "Lời thoại có thể trầm, đau đớn, co rút"),
     "changed": ("ĐÃ THAY ĐỔI", "Vừa trải qua sự kiện lớn — tông có thể khác hẳn"),
+}
+
+_VALID_ROLES = {
+    "MC", "Party Member", "Enemy", "NPC", "Mentor",
+    "Rival", "Love Interest", "Antagonist", "Unknown",
 }
 
 
@@ -78,15 +87,29 @@ def filter_characters(chapter_text: str) -> dict[str, str]:
 
 
 def _matches(name: str, profile: dict, text: str) -> bool:
+    r"""
+    Kiểm tra tên có xuất hiện trong text không.
+    Dùng (?<!\w)...(?!\w) thay vì \b để xử lý Unicode (tiếng Việt) đúng hơn.
+    """
     candidates = (
         [name]
         + profile.get("known_aliases", [])
         + profile.get("identity", {}).get("aliases", [])
     )
-    return any(
-        n and re.search(rf"\b{re.escape(n)}\b", text, re.IGNORECASE)
-        for n in candidates
-    )
+    for n in candidates:
+        if not n:
+            continue
+        try:
+            if re.search(
+                rf"(?<![^\W_]){re.escape(n)}(?![^\W_])",
+                text,
+                re.IGNORECASE | re.UNICODE,
+            ):
+                return True
+        except re.error:
+            if n.lower() in text.lower():
+                return True
+    return False
 
 
 # ── Format profile ────────────────────────────────────────────────
@@ -148,7 +171,7 @@ def _fmt(name: str, p: dict, text: str, mc_name: str, archived: bool = False) ->
     for other, r in rels.items():
         if not r.get("dynamic"):
             continue
-        if other == mc_name or re.search(rf"\b{re.escape(other)}\b", text, re.IGNORECASE):
+        if other == mc_name or _name_in_text(other, text):
             entry = (other, r["dynamic"], r.get("pronoun_status", "weak"))
             (strong_entries if entry[2] == "strong" else weak_entries).append(entry)
 
@@ -168,7 +191,7 @@ def _fmt(name: str, p: dict, text: str, mc_name: str, archived: bool = False) ->
     fallback_specific = {
         t: s for t, s in how.items()
         if not t.startswith("default") and t not in covered
-        and re.search(rf"\b{re.escape(t)}\b", text, re.IGNORECASE)
+        and _name_in_text(t, text)
     }
     fallback_defaults = {t: s for t, s in how.items() if t.startswith("default")}
     if fallback_specific or fallback_defaults:
@@ -201,10 +224,24 @@ def _fmt(name: str, p: dict, text: str, mc_name: str, archived: bool = False) ->
     if mc_name and mc_name in rels and name != mc_name:
         lines += _fmt_rel(mc_name, rels[mc_name])
     for other, r in rels.items():
-        if other != mc_name and re.search(rf"\b{re.escape(other)}\b", text, re.IGNORECASE):
+        if other != mc_name and _name_in_text(other, text):
             lines += _fmt_rel(other, r)
 
     return "\n".join(lines)
+
+
+def _name_in_text(name: str, text: str) -> bool:
+    """Helper nhỏ: kiểm tra tên có trong text không."""
+    if not name:
+        return False
+    try:
+        return bool(re.search(
+            rf"(?<![^\W_]){re.escape(name)}(?![^\W_])",
+            text,
+            re.IGNORECASE | re.UNICODE,
+        ))
+    except re.error:
+        return name.lower() in text.lower()
 
 
 def _fmt_rel(other: str, r: dict) -> list[str]:
@@ -265,8 +302,24 @@ def update_from_response(
 
         for char in new_chars:
             name = char.name.strip()
-            if not name or name in chars or name in stg_chars:
+
+            # ── Validate trước khi lưu ────────────────────────
+            if not name or len(name) < 2:
+                logging.warning(
+                    f"[Characters] Bỏ qua nhân vật tên rỗng/quá ngắn "
+                    f"('{char.name}') từ {source_chapter}"
+                )
                 continue
+            if name in chars or name in stg_chars:
+                continue
+
+            # Sanitize role
+            if char.role not in _VALID_ROLES:
+                logging.warning(
+                    f"[Characters] '{name}' role='{char.role}' không hợp lệ → đặt NPC"
+                )
+                char.role = "NPC"
+
             profile = _build_profile(char, source_chapter, chapter_index)
             if settings.immediate_merge:
                 chars[name] = profile
@@ -407,7 +460,7 @@ def _build_profile(char: CharacterDetail, src: str, idx: int) -> dict:
         "active_identity"  : char.active_identity or char.name,
         "known_aliases"    : char.aliases,
         "identity_context" : char.identity_context,
-        "role"             : char.role,
+        "role"             : char.role if char.role in _VALID_ROLES else "NPC",
         "archetype"        : char.archetype,
         "personality_traits": char.personality_traits,
         "speech"           : {

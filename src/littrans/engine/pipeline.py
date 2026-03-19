@@ -9,6 +9,10 @@ Luồng:
        c. Sync staging → Active
   ③ Retry pass (RETRY_FAILED_PASSES vòng)
   ④ Final sync + Auto-merge + Tổng kết
+
+[v4.2] quality_failed: khi vẫn lỗi sau max_retries → ghi file nhưng KHÔNG cập nhật data.
+[v4.2] temperature tăng dần theo attempt: 0.4 → 0.5 → 0.6 (max 0.7).
+[v4.2] Log file cần review thủ công vào logs/review_needed.log.
 """
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ import os
 import re
 import time
 import logging
-import tempfile
+import datetime
 from pathlib import Path
 
 from littrans.config.settings import settings
@@ -33,6 +37,30 @@ from littrans.engine.prompt_builder import build as build_prompt
 from littrans.engine.quality_guard  import check as quality_check, build_retry_prompt
 from littrans.llm.client            import call_gemini, is_rate_limit, handle_api_error, key_pool
 
+
+# ── Review log ────────────────────────────────────────────────────
+
+def _log_review_needed(filename: str, reason: str) -> None:
+    """Ghi vào logs/review_needed.log các chương cần kiểm tra thủ công."""
+    try:
+        settings.log_dir.mkdir(parents=True, exist_ok=True)
+        review_file = settings.log_dir / "review_needed.log"
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(review_file, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {filename} — {reason}\n")
+    except Exception as e:
+        logging.error(f"_log_review_needed: {e}")
+
+
+def _retry_temperature(attempt: int) -> float:
+    """
+    Tăng nhiệt độ theo lần thử để tránh AI lặp lại cùng lỗi cũ.
+    attempt=1 → 0.40, attempt=2 → 0.50, attempt=3 → 0.60, attempt>=4 → 0.70
+    """
+    return min(0.4 + (attempt - 1) * 0.1, 0.7)
+
+
+# ── Pipeline ──────────────────────────────────────────────────────
 
 class Pipeline:
     """Singleton-like orchestrator. Tạo 1 instance, gọi .run() hoặc .retranslate()."""
@@ -136,7 +164,14 @@ class Pipeline:
         chapter_index  : int,
         skip_data_update: bool = False,
     ) -> bool:
-        """Dịch 1 chương. Trả về True nếu thành công."""
+        """
+        Dịch 1 chương. Trả về True nếu file được ghi thành công.
+
+        Khi quality vẫn fail sau max_retries:
+          - File vẫn được ghi (để kiểm tra thủ công)
+          - Data KHÔNG được cập nhật (glossary/chars/skills giữ nguyên)
+          - Ghi cảnh báo vào logs/review_needed.log
+        """
         text = load_text(filepath)
         if not text.strip():
             print(f"  ⚠️  File rỗng: {filename}"); return False
@@ -170,16 +205,20 @@ class Pipeline:
             chapter_text      = text,
         )
 
-        quality_warning = ""
+        quality_warning  = ""
+        quality_failed   = False  # True khi vẫn còn lỗi sau max_retries
 
         for attempt in range(1, settings.max_retries + 1):
             try:
-                print(f"  ⚙️  API call {attempt}/{settings.max_retries} | {settings.gemini_model}")
+                temp = _retry_temperature(attempt)
+                temp_label = f" | temp={temp:.1f}" if attempt > 1 else ""
+                print(f"  ⚙️  API call {attempt}/{settings.max_retries} | {settings.gemini_model}{temp_label}")
+
                 input_text = (
                     build_retry_prompt(text, quality_warning) if quality_warning else text
                 )
 
-                result = call_gemini(system_prompt, input_text)
+                result = call_gemini(system_prompt, input_text, temperature=temp)
 
                 # Quality check
                 ok, msg = quality_check(result.translation, text)
@@ -188,11 +227,16 @@ class Pipeline:
                     print(f"  ⚠️  Lỗi chất lượng ({attempt}/{settings.max_retries}): {msg}")
                     if attempt < settings.max_retries:
                         quality_warning = msg
-                        print(f"  🔄 Yêu cầu dịch lại...")
+                        next_temp = _retry_temperature(attempt + 1)
+                        print(f"  🔄 Dịch lại (temp {next_temp:.1f})...")
                         self._wait_quality(attempt)
                         continue
                     else:
-                        print(f"  ⚠️  Vẫn còn lỗi sau {settings.max_retries} lần. Ghi file để kiểm tra.")
+                        # Hết lần thử — ghi file nhưng KHÔNG cập nhật data
+                        quality_failed = True
+                        print(f"  ⚠️  Vẫn còn lỗi sau {settings.max_retries} lần "
+                              f"— ghi file để kiểm tra thủ công.")
+                        _log_review_needed(filename, msg)
 
                 # Name Lock validate
                 violations = validate_translation(result.translation, name_lock)
@@ -204,9 +248,14 @@ class Pipeline:
 
                 # Write output
                 atomic_write(out_filepath, result.translation)
-                print(f"  ✅ Dịch xong: {filename}")
 
-                if not skip_data_update:
+                if quality_failed:
+                    print(f"  📄 Đã ghi: {filename} [⚠️ cần review — data KHÔNG cập nhật]")
+                else:
+                    print(f"  ✅ Dịch xong: {filename}")
+
+                # Cập nhật data CHỈ KHI bản dịch pass quality check
+                if not quality_failed and not skip_data_update:
                     n_terms = add_new_terms(result.new_terms, filename)
                     if n_terms: print(f"  📝 Thuật ngữ mới: {n_terms}")
 
@@ -222,6 +271,10 @@ class Pipeline:
                         print(f"  👤 Nhân vật mới: {n_chars} → {dest}")
                     if n_rels: print(f"  🔗 Quan hệ cập nhật: {n_rels}")
 
+                elif quality_failed:
+                    print(f"  ℹ️  Bỏ qua cập nhật Glossary / Characters / Skills.")
+
+                # touch_seen luôn chạy (nhân vật đã xuất hiện dù dịch tệ)
                 touch_seen(list(char_profiles.keys()), chapter_index)
                 time.sleep(settings.success_sleep)
                 return True
@@ -337,8 +390,17 @@ class Pipeline:
             "tắt" if settings.budget_limit == 0
             else f"{settings.budget_limit:,} token"
         )
+        # Hiển thị danh sách review_needed nếu có
+        review_file = settings.log_dir / "review_needed.log"
+        review_count = 0
+        if review_file.exists():
+            try:
+                review_count = sum(1 for _ in open(review_file, encoding="utf-8"))
+            except Exception:
+                pass
+
         print(f"\n{'═'*62}")
-        print(f"  Pipeline Dịch Truyện v4.1 — {settings.gemini_model}")
+        print(f"  Pipeline Dịch Truyện v4.2 — {settings.gemini_model}")
         print(f"{'─'*62}")
         print(f"  Tổng chương      : {len(all_files)}")
         print(f"  Cần dịch         : {len(pending)}")
@@ -352,11 +414,14 @@ class Pipeline:
         print(f"  Scout            : mỗi {settings.scout_refresh_every} chương, đọc {settings.scout_lookback}")
         print(f"  Merge mode       : {'Ngay sau mỗi chương' if settings.immediate_merge else 'Cuối pipeline'}")
         print(f"  Retry passes     : {settings.retry_failed_passes}")
+        if review_count:
+            print(f"  ⚠️  Cần review    : {review_count} chương (xem logs/review_needed.log)")
         print(f"{'═'*62}\n")
 
     def _print_summary(self, total_ok: int, total_fail: int, failed: list) -> None:
         remaining = [fn for _, fn, _, op in failed if not os.path.exists(op)]
         kp = key_pool.stats()
+        review_file = settings.log_dir / "review_needed.log"
         print(f"\n{'═'*62}")
         print(f"  ✅ Thành công : {total_ok} chương")
         print(f"  ❌ Thất bại   : {len(remaining)} chương")
@@ -364,4 +429,6 @@ class Pipeline:
             for fn in remaining: print(f"     • {fn}")
         if kp['total_keys'] > 1:
             print(f"  🔑 Keys: {kp['total_keys']} · {kp['dead_keys']} exhausted · final #{kp['active_idx']+1}")
+        if review_file.exists():
+            print(f"  ⚠️  Xem logs/review_needed.log để biết chương cần review thủ công.")
         print(f"{'═'*62}")
