@@ -4,3 +4,7 @@ python-dotenv>=1.0
 typer[all]>=0.12
 tqdm>=4.0
 pyahocorasick>=2.0   # optional but recommended (~10x glossary filter speedup)
+
+# Web UI (optional — chỉ cần khi dùng `python run_ui.py`)
+streamlit>=1.30
+pandas>=2.0
