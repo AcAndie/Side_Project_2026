@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<TRANSLATOR version="4.1">
+<TRANSLATOR version="4.2">
 
 <PRONOUNS>
   <PRIORITY>
@@ -60,13 +60,179 @@
   <FORMAT>Dùng Markdown Blockquotes (> ) hoặc Code Block tùy độ phức tạp.</FORMAT>
 </SYSTEM_BOX>
 
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- FORMAT — QUY TẮC TRÌNH BÀY CHI TIẾT                           -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
 <FORMAT>
-  <LINE_SPACING>Đoạn văn cách nhau đúng 1 dòng trống. Không dùng 2 dòng trống liên tiếp.</LINE_SPACING>
-  <STYLING>Chỉ dùng **bold** / *italic* / [Kỹ năng] đúng như bản gốc.</STYLING>
+
+  <!-- ── BƯỚC 0: XỬ LÝ BẢN GỐC XẤU ──────────────────────────── -->
+  <RAW_INPUT_FIX priority="DO_FIRST">
+    Bản gốc có thể bị vỡ dòng, lỗi spacing. XỬ LÝ TRƯỚC khi dịch:
+
+    <FIX id="BROKEN_LINE">
+      Câu bị cắt ngang dòng (dòng kết thúc không có dấu câu, tiếp tục ở dòng sau)
+      → GOM lại thành câu / đoạn hoàn chỉnh.
+      <EX bad="He raised his hand\nand struck the enemy." good="He raised his hand and struck the enemy."/>
+    </FIX>
+
+    <FIX id="DIALOGUE_BROKEN">
+      Lời thoại bị tách 2 dòng giữa chừng (không có đóng ngoặc)
+      → Nối lại thành 1 đoạn thoại trước khi dịch.
+    </FIX>
+
+    <FIX id="MULTI_BLANK">
+      3+ dòng trống liên tiếp → chuẩn hóa về đúng 1 dòng trống.
+    </FIX>
+
+    <FIX id="SYSTEM_BOX_BLANK">
+      Bản gốc có dòng trống thừa TRONG system box
+      → Loại bỏ dòng trống đó, giữ nội dung box liền mạch.
+    </FIX>
+  </RAW_INPUT_FIX>
+
+  <!-- ── BƯỚC 1: NHẬN DIỆN LOẠI ĐOẠN ─────────────────────────── -->
+  <!--
+    5 loại block. Nhận diện đúng → áp dụng quy tắc tương ứng.
+    Lỗi phổ biến nhất: áp dụng nhầm quy tắc NARRATIVE vào SYSTEM_BOX.
+  -->
+
+  <BLOCK type="NARRATIVE">
+    ĐẶC ĐIỂM: Mô tả, tường thuật, hành động, cảnh vật.
+    QUY TẮC  : Mỗi đoạn cách nhau ĐÚNG 1 dòng trống.
+               KHÔNG 2 dòng trống. KHÔNG 0 dòng trống (gộp đoạn).
+
+    <EXAMPLE>
+Hắn đứng giữa đấu trường, thở phào nhẹ nhõm.
+
+Trước mặt hắn, tên địch ngã nhào xuống đất — không còn dấu hiệu sống.
+    </EXAMPLE>
+  </BLOCK>
+
+  <BLOCK type="DIALOGUE">
+    ĐẶC ĐIỂM: Lời thoại của nhân vật (có dấu "").
+    QUY TẮC  :
+      • Mỗi lượt thoại = 1 đoạn RIÊNG, cách đoạn trước/sau bằng 1 dòng trống.
+      • Tag hành động đi kèm ("he said", "she whispered") → CÙNG đoạn với thoại đó.
+      • Dùng "". KHÔNG dùng '' hoặc ``.
+      • Người nói mới = xuống dòng mới + 1 dòng trống trước.
+
+    <EXAMPLE>
+"Ngươi nghĩ ngươi có thể thắng ta?" tên địch hét lên.
+
+"Không." Hắn đáp gọn lỏn, mắt không rời đối thủ.
+
+"Nhưng ta sẽ không thua."
+    </EXAMPLE>
+
+    <ANTI_EXAMPLE comment="SAI — 2 lượt thoại gộp chung 1 đoạn">
+"Ngươi nghĩ ngươi có thể thắng ta?" tên địch hét lên. "Không," hắn đáp, "nhưng ta sẽ không thua."
+    </ANTI_EXAMPLE>
+  </BLOCK>
+
+  <BLOCK type="INNER_MONOLOGUE">
+    ĐẶC ĐIỂM: Suy nghĩ nội tâm — thường *in nghiêng* trong bản gốc.
+    QUY TẮC  :
+      • Giữ *in nghiêng* (dấu * ... *).
+      • Cách đoạn xung quanh 1 dòng trống.
+      • KHÔNG gộp vào đoạn tường thuật liền kề.
+
+    <EXAMPLE>
+Hắn nhìn tấm bản đồ, cau mày.
+
+*Đường này... không đúng. Ai đó đã thay đổi mốc ranh giới.*
+
+"Chúng ta đi sai hướng rồi," hắn nói khẽ.
+    </EXAMPLE>
+  </BLOCK>
+
+  <BLOCK type="SYSTEM_BOX">
+    ĐẶC ĐIỂM: Thông báo System, bảng chỉ số, kỹ năng, thông báo LevelUp.
+    NHẬN DIỆN: có ─, ═, │, ▸, ◆, [Skill], Ding!, Level Up!, You have gained...
+    QUY TẮC  :
+      • TUYỆT ĐỐI KHÔNG có dòng trống GIỮA các dòng trong box.
+      • Có đúng 1 dòng trống TRƯỚC box và 1 dòng trống SAU box
+        (để phân tách với đoạn văn thường).
+      • Giữ nguyên ký tự khung (─ ═ │ ▸ ◆).
+
+    <EXAMPLE_GOOD comment="ĐÚNG — không có dòng trống trong box">
+
+══════════════════════════════════════
+ THĂNG CẤP!
+ Cấp độ: 14 → 15
+ Điểm kỹ năng: +2
+══════════════════════════════════════
+
+    </EXAMPLE_GOOD>
+
+    <EXAMPLE_BAD comment="SAI — có dòng trống giữa các dòng trong box">
+
+══════════════════════════════════════
+
+ THĂNG CẤP!
+
+ Cấp độ: 14 → 15
+
+ Điểm kỹ năng: +2
+
+══════════════════════════════════════
+
+    </EXAMPLE_BAD>
+  </BLOCK>
+
+  <BLOCK type="STAT_LIST">
+    ĐẶC ĐIỂM: Danh sách liên tiếp — thuộc tính, inventory, nhiệm vụ, thành tích.
+    NHẬN DIỆN: Nhiều dòng ngắn liên tiếp, thường có dấu :, /, •, -, →.
+    QUY TẮC  :
+      • KHÔNG có dòng trống giữa các mục trong cùng danh sách.
+      • Có 1 dòng trống trước và sau cả danh sách.
+
+    <EXAMPLE>
+Vật phẩm nhận được:
+- [Kiếm Sắt Thượng Phẩm] × 1
+- [Linh Thạch Bậc 2] × 3
+- [Mảnh Giáp Cổ] × 5
+    </EXAMPLE>
+  </BLOCK>
+
+  <!-- ── BƯỚC 2: QUY TẮC BỔ SUNG ──────────────────────────────── -->
+
+  <LINE_SPACING>
+    Đoạn văn cách nhau ĐÚNG 1 dòng trống.
+    KHÔNG dùng 2 dòng trống liên tiếp (ngoại trừ phân cách system box).
+    KHÔNG gộp 2 đoạn thành 1 dòng.
+  </LINE_SPACING>
+
+  <CHAPTER_TITLE>
+    Tiêu đề chương: giữ heading Markdown (# ##).
+    1 dòng trống sau tiêu đề trước khi vào nội dung.
+  </CHAPTER_TITLE>
+
+  <STYLING>
+    Chỉ dùng **bold** / *italic* / [Kỹ năng] đúng như bản gốc.
+    KHÔNG thêm markdown mới không có trong bản gốc.
+  </STYLING>
+
   <SKILL_BRACKET>[Fireball] → **[Hỏa Cầu]** — dịch nội dung, giữ ngoặc vuông.</SKILL_BRACKET>
-  <INNER_MONOLOGUE>Giữ in nghiêng.</INNER_MONOLOGUE>
-  <DIALOGUE>Dùng "". Người nói mới = xuống dòng + dòng trống.</DIALOGUE>
+
+  <INNER_MONOLOGUE>Giữ in nghiêng. KHÔNG bỏ dấu *.</INNER_MONOLOGUE>
+
+  <DIALOGUE>Dùng "". Người nói mới = xuống dòng + dòng trống trước.</DIALOGUE>
+
   <UNITS>feet→mét / miles→km / pounds→kg / inches→cm</UNITS>
+
+  <SFX>Boom→*Ầm!* / Thud→*Bịch!* / Clang→*Keng!* / Click→*Cạch*</SFX>
+
+  <!-- ── BƯỚC 3: DANH SÁCH CẤM ─────────────────────────────────── -->
+  <ANTI_FORMAT>
+    <V id="DOUBLE_BLANK">KHÔNG dùng 2+ dòng trống liên tiếp (ngoài ranh giới system box).</V>
+    <V id="BOX_BLANK">KHÔNG thêm dòng trống TRONG system box / danh sách chỉ số.</V>
+    <V id="MERGE_PARA">KHÔNG gộp 2 đoạn văn riêng biệt thành 1 dòng.</V>
+    <V id="SPLIT_PARA">KHÔNG tự ý tách 1 đoạn văn thành nhiều đoạn không có trong gốc.</V>
+    <V id="SPLIT_DIALOGUE">KHÔNG tách 1 lượt thoại + tag hành động thành 2 đoạn riêng.</V>
+    <V id="ADD_COMMENT">KHÔNG thêm lời mở đầu, kết luận, hay chú thích người dịch.</V>
+    <V id="MISSING_CONTENT">KHÔNG bỏ qua, tóm tắt, hay rút gọn bất kỳ đoạn nào.</V>
+  </ANTI_FORMAT>
+
 </FORMAT>
 
 <STYLE>
@@ -76,16 +242,15 @@
     <EX en="She fell to the ground."    vn="Cô văng sầm xuống đất."/>
     <EX en="He cut through the shield." vn="Hắn chém xẻ đôi lá chắn."/>
   </COMBAT>
-  <SFX>Boom→*Ầm!* / Thud→*Bịch!* / Clang→*Keng!* / Click→*Cạch*</SFX>
   <COMEDY>
     Setup hoành tráng + punchline thảm hại → Hán Việt setup, slang thuần Việt punchline.
   </COMEDY>
   <ANTI_TL>
-    <V name="PRONOUN_SPAM"   fix="zero-pronoun hoặc vai trò (Hắn, Gã pháp sư...)"/>
-    <V name="NOUN_OF_NOUN"   fix="động từ hóa hoặc tính từ hóa"/>
+    <V name="PRONOUN_SPAM"     fix="zero-pronoun hoặc vai trò (Hắn, Gã pháp sư...)"/>
+    <V name="NOUN_OF_NOUN"     fix="động từ hóa hoặc tính từ hóa"/>
     <V name="TIME_MARKER_SPAM" fix="bỏ đã/đang khi không nhấn mạnh thời điểm"/>
-    <V name="PASSIVE_CLUNK"  fix="đổi sang chủ động"/>
-    <V name="LITERAL_IDIOMS" fix="thành ngữ VN tương đương"/>
+    <V name="PASSIVE_CLUNK"    fix="đổi sang chủ động"/>
+    <V name="LITERAL_IDIOMS"   fix="thành ngữ VN tương đương"/>
   </ANTI_TL>
   <PROFANITY>KHÔNG: đéo/cặc/đm/vãi l**. THAY: đếch / vãi chưởng / cái quái gì / tên khốn.</PROFANITY>
 </STYLE>
