@@ -6,6 +6,7 @@ Chỉnh qua .env, KHÔNG sửa file này.
 [v4.3 FIX] _env_bool() xử lý đầy đủ các giá trị truthy phổ biến:
   true / True / TRUE / 1 / yes / on → True
   false / False / FALSE / 0 / no / off / (rỗng) → False
+[v4.4] Thêm 3 config cho Scout Glossary Suggest.
 """
 from __future__ import annotations
 
@@ -37,6 +38,12 @@ def _env_bool(key: str, default: bool) -> bool:
         return default
     return val in ("true", "1", "yes", "on")
 
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.environ.get(key, str(default)))
+    except (ValueError, TypeError):
+        return default
+
 
 @dataclass
 class Settings:
@@ -65,6 +72,11 @@ class Settings:
     scout_lookback        : int  = field(default_factory=lambda: _env_int("SCOUT_LOOKBACK", 10))
     scout_refresh_every   : int  = field(default_factory=lambda: _env_int("SCOUT_REFRESH_EVERY", 5))
     arc_memory_window     : int  = field(default_factory=lambda: _env_int("ARC_MEMORY_WINDOW", 3))
+
+    # ── Scout Glossary Suggest ────────────────────────────────────
+    scout_suggest_glossary      : bool  = field(default_factory=lambda: _env_bool("SCOUT_SUGGEST_GLOSSARY", True))
+    scout_suggest_min_confidence: float = field(default_factory=lambda: _env_float("SCOUT_SUGGEST_MIN_CONFIDENCE", 0.7))
+    scout_suggest_max_terms     : int   = field(default_factory=lambda: _env_int("SCOUT_SUGGEST_MAX_TERMS", 20))
 
     # ── Characters ───────────────────────────────────────────────
     archive_after_chapters: int  = field(default_factory=lambda: _env_int("ARCHIVE_AFTER_CHAPTERS", 60))

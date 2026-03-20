@@ -5,12 +5,15 @@ Mỗi SCOUT_REFRESH_EVERY chương:
   1. Xóa Context_Notes cũ → sinh mới (4 mục)
   2. Append Arc_Memory (tóm tắt window)
   3. [v4] Cập nhật emotional_state nhân vật
+  4. [v4.4] Đề xuất thuật ngữ mới → Staging_Terms.md
 
 Không raise — pipeline tiếp tục nếu Scout thất bại.
 
 [v4.2] Validate emotional_states là list + giá trị hợp lệ trước khi ghi DB.
-[v4.3 FIX] Xoá dead import `from google.genai import types` — không dùng trực tiếp ở đây;
-           mọi API call đã được đóng gói trong littrans.llm.client.
+[v4.3 FIX] Xoá dead import `from google.genai import types`.
+[v4.4] Thêm _suggest_new_terms() — Scout Glossary Suggest.
+       Chạy call riêng (call_gemini_json) sau context notes để không nhiễu 4 mục chính.
+       Có thể tắt qua SCOUT_SUGGEST_GLOSSARY=false.
 """
 from __future__ import annotations
 
@@ -68,6 +71,42 @@ Quy tắc:
 - "changed" : vừa trải qua sự kiện lớn thay đổi nhận thức/mục tiêu
 - Chỉ nhân vật có tên rõ ràng và xuất hiện đáng kể. Tối đa 8 nhân vật."""
 
+_GLOSSARY_SUGGEST_SYSTEM = """Bạn là chuyên gia thuật ngữ cho truyện LitRPG / Tu Tiên.
+
+Đọc đoạn truyện tiếng Anh và tìm thuật ngữ CHUYÊN BIỆT chưa có trong danh sách đã biết.
+
+CẦN BÁO CÁO (ưu tiên theo thứ tự):
+  1. Tên kỹ năng, chiêu thức, phép thuật, kỹ thuật chiến đấu
+  2. Danh hiệu, cấp bậc tu luyện, cảnh giới, tước vị
+  3. Tên tổ chức, hội phái, môn phái, lực lượng
+  4. Địa danh, vùng đất, cõi giới, dungeon
+  5. Vật phẩm đặc biệt, đan dược, vũ khí có tên riêng
+  6. Thuật ngữ hệ thống: pathway, sequence, ability class...
+
+KHÔNG BÁO CÁO:
+  - Tên nhân vật (đã có hệ thống riêng)
+  - Từ tiếng Anh thông thường không cần dịch
+  - Thuật ngữ đã có trong danh sách "ĐÃ BIẾT" dưới đây
+  - Bất cứ thứ gì chưa đủ ngữ cảnh để dịch chính xác
+
+Quy tắc dịch đề xuất:
+  - Tên kỹ năng / danh hiệu / cảnh giới → Hán Việt, đặt trong [ngoặc vuông] nếu là kỹ năng
+  - Địa danh Hán → Hán Việt
+  - Tên phương Tây, LitRPG sequence → giữ nguyên tiếng Anh
+
+Trả về JSON. KHÔNG thêm bất cứ thứ gì ngoài JSON:
+{
+  "suggested_terms": [
+    {
+      "english": "tên thuật ngữ tiếng Anh gốc",
+      "vietnamese": "bản dịch đề xuất",
+      "category": "pathways|organizations|items|locations|general",
+      "confidence": 0.85,
+      "context": "mô tả ngắn: xuất hiện ở đâu, nghĩa là gì"
+    }
+  ]
+}"""
+
 _VALID_STATES      = {"normal", "angry", "hurt", "changed"}
 _VALID_INTENSITIES = {"low", "medium", "high"}
 
@@ -75,7 +114,7 @@ _VALID_INTENSITIES = {"low", "medium", "high"}
 # ── Public API ────────────────────────────────────────────────────
 
 def run(all_files: list[str], current_index: int) -> None:
-    """Chạy toàn bộ Scout: notes + arc memory + emotion. Không raise."""
+    """Chạy toàn bộ Scout: notes + arc memory + emotion + glossary suggest. Không raise."""
     _refresh_context_notes(all_files, current_index)
 
     start  = max(0, current_index - settings.scout_lookback)
@@ -94,6 +133,12 @@ def run(all_files: list[str], current_index: int) -> None:
     except Exception as e:
         logging.error(f"Emotion Tracker: {e}")
         print(f"  ⚠️  Emotion Tracker lỗi: {e}")
+
+    try:
+        _suggest_new_terms(all_files, current_index)
+    except Exception as e:
+        logging.error(f"GlossarySuggest: {e}")
+        print(f"  ⚠️  Glossary Suggest lỗi: {e}")
 
 
 def should_refresh(chapters_done: int) -> bool:
@@ -256,3 +301,130 @@ def _update_emotional_states(all_files: list[str], current_index: int) -> None:
         ]
         print(f"  💭 Emotion Tracker: {updated} cập nhật"
               + (f" | Active: {', '.join(non_normal[:5])}" if non_normal else " | Tất cả normal"))
+
+
+# ── Glossary Suggest ──────────────────────────────────────────────
+
+def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
+    """
+    Đề xuất thuật ngữ mới từ window hiện tại → ghi vào Staging_Terms.md.
+
+    Luồng:
+      1. Đọc 5 chương EN gần nhất trong window (tiết kiệm token)
+      2. Load existing_terms_set() để dedup
+      3. call_gemini_json() với _GLOSSARY_SUGGEST_SYSTEM
+      4. Filter theo confidence >= SCOUT_SUGGEST_MIN_CONFIDENCE
+      5. Gọi add_new_terms() → staging (nếu IMMEDIATE_MERGE=false) hoặc trực tiếp vào category file
+
+    Chỉ chạy khi SCOUT_SUGGEST_GLOSSARY=true. Không raise.
+    """
+    if not settings.scout_suggest_glossary:
+        return
+
+    start  = max(0, current_index - settings.scout_lookback)
+    window = all_files[start:current_index]
+    if not window:
+        return
+
+    # Chỉ đọc EN (chưa có bản dịch VN cho window này)
+    # Giới hạn 5 chương gần nhất để tiết kiệm token
+    texts = []
+    for fn in window[-5:]:
+        text = load_text(str(settings.input_dir / fn))
+        if text.strip():
+            texts.append((fn, text[:5000]))
+
+    if not texts:
+        return
+
+    # Load existing terms để dedup
+    from littrans.managers.glossary import existing_terms_set
+    known = existing_terms_set()
+
+    # Giới hạn danh sách "đã biết" để không bloat prompt (200 terms đủ để dedup tốt)
+    known_sample = sorted(known)[:200]
+    known_block  = "\n".join(f"- {t}" for t in known_sample)
+    if len(known) > 200:
+        known_block += f"\n... (và {len(known) - 200} thuật ngữ khác)"
+
+    user_msg = (
+        f"## THUẬT NGỮ ĐÃ BIẾT — KHÔNG BÁO CÁO LẠI\n"
+        f"{known_block}\n\n"
+        f"---\n\n"
+        + "\n\n---\n\n".join(f"### {fn}\n\n{text}" for fn, text in texts)
+    )
+
+    try:
+        from littrans.llm.client import call_gemini_json
+        data = call_gemini_json(_GLOSSARY_SUGGEST_SYSTEM, user_msg)
+    except Exception as e:
+        logging.error(f"[GlossarySuggest] call lỗi: {e}")
+        return
+
+    if not isinstance(data, dict):
+        logging.warning(f"[GlossarySuggest] Response không phải dict: {type(data)}")
+        return
+
+    suggestions = data.get("suggested_terms", [])
+    if not isinstance(suggestions, list) or not suggestions:
+        return
+
+    # Filter theo confidence + dedup với known set
+    from littrans.llm.schemas import TermDetail
+
+    filtered: list[TermDetail] = []
+    seen_this_batch: set[str]  = set()
+
+    for s in suggestions:
+        if not isinstance(s, dict):
+            continue
+
+        eng  = s.get("english", "").strip()
+        vn   = s.get("vietnamese", "").strip()
+        cat  = s.get("category", "general")
+        conf = 0.0
+        try:
+            conf = float(s.get("confidence", 0))
+        except (ValueError, TypeError):
+            pass
+
+        # Validate
+        if not eng or not vn:
+            continue
+        if conf < settings.scout_suggest_min_confidence:
+            continue
+        if eng.lower() in known or eng.lower() in seen_this_batch:
+            continue
+        if len(filtered) >= settings.scout_suggest_max_terms:
+            break
+
+        # Normalize category
+        if cat not in ("pathways", "organizations", "items", "locations", "general"):
+            cat = "general"
+
+        try:
+            filtered.append(TermDetail(
+                english    = eng,
+                vietnamese = vn,
+                category   = cat,
+            ))
+            seen_this_batch.add(eng.lower())
+        except Exception as e:
+            logging.warning(f"[GlossarySuggest] TermDetail parse lỗi [{eng}]: {e}")
+
+    if not filtered:
+        return
+
+    from littrans.managers.glossary import add_new_terms
+
+    source_label = f"scout_suggest_{window[-1]}"
+    n = add_new_terms(filtered, source_label)
+
+    if n:
+        # Log tóm tắt theo category
+        cats: dict[str, int] = {}
+        for t in filtered[:n]:
+            cats[t.category] = cats.get(t.category, 0) + 1
+        cat_str  = " · ".join(f"{k}:{v}" for k, v in sorted(cats.items()))
+        dest_str = "Glossary" if settings.immediate_merge else "Staging"
+        print(f"  📖 Glossary Suggest: +{n} thuật ngữ → {dest_str} ({cat_str})")

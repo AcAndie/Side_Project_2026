@@ -1,0 +1,45 @@
+services:
+
+  # ── Web UI ──────────────────────────────────────────────────────
+  # Khởi động mặc định: docker compose up
+  ui:
+    build: .
+    image: littrans:latest
+    container_name: littrans-ui
+    ports:
+      - "8501:8501"
+    volumes:
+      # Data directories — persist trên host, không mất khi rebuild image
+      - ./inputs:/app/inputs
+      - ./outputs:/app/outputs
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # .env mount read-only — không bao giờ bake secret vào image
+      - ./.env:/app/.env:ro
+      # Uncomment dòng dưới để override prompts mà không cần rebuild image:
+      # - ./prompts:/app/prompts:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    command: python run_ui.py --host 0.0.0.0
+
+  # ── CLI ─────────────────────────────────────────────────────────
+  # Chỉ start khi gọi tường minh: docker compose run --rm cli <cmd>
+  # Không start khi `docker compose up` (profiles: cli)
+  cli:
+    build: .
+    image: littrans:latest
+    container_name: littrans-cli
+    profiles:
+      - cli
+    volumes:
+      - ./inputs:/app/inputs
+      - ./outputs:/app/outputs
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    # command được override khi chạy, ví dụ:
+    #   docker compose run --rm cli python main.py translate
+    #   docker compose run --rm cli python main.py stats

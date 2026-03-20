@@ -7,6 +7,7 @@ src/littrans/managers/glossary.py — Glossary phân category + Aho-Corasick fil
 
 [v4 FIX] Aho-Corasick cache key bao gồm max_mtime → tự invalidate khi file thay đổi.
 [v4.3 FIX] Không làm tròn mtime — tránh cache stale khi file được ghi trong cùng 1 giây.
+[v4.4] Thêm existing_terms_set() public — dùng bởi Scout Glossary Suggest.
 """
 from __future__ import annotations
 
@@ -134,6 +135,19 @@ def _get_automaton(flat: dict):
 
         _aho_cache[cache_key] = A
         return A
+
+
+# ── Public helper for Scout Glossary Suggest ─────────────────────
+
+def existing_terms_set() -> set[str]:
+    """
+    Trả về set tất cả terms đã có (lowercase) từ mọi glossary file + staging.
+    Dùng bởi Scout Glossary Suggest để dedup trước khi đề xuất.
+    """
+    found: set[str] = set()
+    for terms in _load_all().values():
+        found.update(terms.keys())  # keys đã là lowercase từ _parse()
+    return found
 
 
 # ── Write ────────────────────────────────────────────────────────

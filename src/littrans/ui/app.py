@@ -4,6 +4,8 @@ src/littrans/ui/app.py — LiTTrans Web UI (Streamlit)
 Khởi động:
     streamlit run src/littrans/ui/app.py
     python run_ui.py
+
+[v4.4] Thêm staging badge trong sidebar và info banner trong Glossary tab.
 """
 from __future__ import annotations
 
@@ -308,8 +310,6 @@ def _poll(q_key: str, logs_key: str) -> bool:
 
 
 def _show_log(logs: list[str], height: int = 200) -> None:
-    # Color-code log lines (badge color injected via markdown hack isn't easy;
-    # plain st.code is the cleanest readable option)
     st.code("\n".join(logs[-300:]) if logs else "(chờ log...)", language=None)
 
 
@@ -492,7 +492,6 @@ def _render_chapter_detail(ch: dict) -> None:
             c1, c2 = st.columns([1, 5])
             if c1.button("📋 Sao chép bản dịch", key="cp_vn"):
                 st.toast("Đã sao chép!", icon="✅")
-            # Download button
             c2.download_button(
                 "⬇ Tải xuống",
                 data=ch["vn"].encode("utf-8"),
@@ -544,7 +543,6 @@ def _render_chapter_detail(ch: dict) -> None:
                 if st.button("⚡ Xác nhận dịch lại", type="primary", key="rt_confirm"):
                     S.rt_logs = []
                     S.rt_q    = queue.Queue()
-                    # Collect all_files for Scout
                     all_files_list = [c["name"] for c in load_chapters()]
                     ch_idx         = ch["idx"]
                     from littrans.ui.runner import run_background
@@ -618,7 +616,6 @@ def _char_card(name: str, p: dict) -> None:
     em     = p.get("emotional_state", {})
     rels   = p.get("relationships", {})
 
-    # Avatar color
     palettes = [
         ("#E1F5EE", "#085041"), ("#EEEDFE", "#3C3489"),
         ("#E6F1FB", "#0C447C"), ("#FAEEDA", "#633806"),
@@ -664,7 +661,6 @@ def _char_card(name: str, p: dict) -> None:
         if goal:
             st.caption(f"Mục tiêu: {goal}")
 
-        # Pronoun pairs (top 2)
         for other, rel in list(rels.items())[:2]:
             dyn    = rel.get("dynamic", "")
             status = rel.get("pronoun_status", "weak")
@@ -688,6 +684,15 @@ def render_glossary() -> None:
     if not glos:
         st.info("Glossary chưa có dữ liệu. Chạy pipeline để tự động thêm thuật ngữ.")
         return
+
+    # ── Banner: staging terms từ Scout Suggest ────────────────────
+    staging_count = len(glos.get("staging", []))
+    if staging_count:
+        st.info(
+            f"📖 Scout AI đề xuất **{staging_count}** thuật ngữ mới đang chờ trong Staging. "
+            "Nhấn **🔄 Clean glossary** bên dưới để phân loại và xác nhận vào đúng category.",
+            icon="📖",
+        )
 
     # ── Toolbar ────────────────────────────────────────────────────
     c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
@@ -818,7 +823,6 @@ def render_stats() -> None:
             st.markdown("**Danh sách chương (tóm tắt)**")
             rows = [{"Chương": c["name"], "Trạng thái": "✅ Đã dịch" if c["done"] else "⬜ Chưa",
                      "Kích thước": c["size"]} for c in chapters]
-            import pandas as pd
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
@@ -863,11 +867,11 @@ def render_settings() -> None:
             "Điền thông tin và nhấn **Lưu .env** để tạo."
         )
 
-    # ── 7 tabs ─────────────────────────────────────────────────────
+    # ── 8 tabs (thêm Scout Glossary Suggest) ──────────────────────
     tabs = st.tabs([
         "🔑 API", "⚙️ Pipeline", "🔭 Scout AI",
-        "👤 Nhân vật", "💰 Token Budget",
-        "🔀 Merge & Retry", "📁 Đường dẫn",
+        "📖 Glossary Suggest", "👤 Nhân vật",
+        "💰 Token Budget", "🔀 Merge & Retry", "📁 Đường dẫn",
     ])
     updates: dict[str, str] = {}
 
@@ -896,7 +900,7 @@ def render_settings() -> None:
         model_idx = _models.index(cur_model) if cur_model in _models else 0
         model  = c1.selectbox("Gemini model", _models, index=model_idx, help="GEMINI_MODEL")
         rotate = c2.number_input("Key rotate threshold", 1, 10, ei("KEY_ROTATE_THRESHOLD", 3),
-                                  help="KEY_ROTATE_THRESHOLD — lỗi liên tiếp trước khi chuyển fallback")
+                                  help="KEY_ROTATE_THRESHOLD")
         updates["GEMINI_MODEL"]         = model
         updates["KEY_ROTATE_THRESHOLD"] = str(rotate)
 
@@ -905,7 +909,7 @@ def render_settings() -> None:
         st.markdown("#### Kiến trúc")
         three_call = st.toggle("3-call mode (Pre → Trans → Post)",
                                value=eb("USE_THREE_CALL", True),
-                               help="USE_THREE_CALL — tắt để dùng 1-call legacy")
+                               help="USE_THREE_CALL")
         updates["USE_THREE_CALL"] = "true" if three_call else "false"
 
         c1, c2, c3 = st.columns(3)
@@ -929,10 +933,10 @@ def render_settings() -> None:
         st.divider()
         st.markdown("#### Timing & Giới hạn")
         c1, c2, c3, c4 = st.columns(4)
-        max_ret   = c1.number_input("Max retries",     1, 20, ei("MAX_RETRIES", 5),           help="MAX_RETRIES")
-        succ_s    = c2.slider("Success sleep (s)",     0, 120, ei("SUCCESS_SLEEP", 30), step=5, help="SUCCESS_SLEEP")
-        rl_s      = c3.slider("Rate limit sleep (s)", 10, 300, ei("RATE_LIMIT_SLEEP", 60), step=10, help="RATE_LIMIT_SLEEP")
-        min_chars = c4.number_input("Min chars/chapter", 0, 5000, ei("MIN_CHARS_PER_CHAPTER", 500), step=100, help="MIN_CHARS_PER_CHAPTER")
+        max_ret   = c1.number_input("Max retries",     1, 20, ei("MAX_RETRIES", 5))
+        succ_s    = c2.slider("Success sleep (s)",     0, 120, ei("SUCCESS_SLEEP", 30), step=5)
+        rl_s      = c3.slider("Rate limit sleep (s)", 10, 300, ei("RATE_LIMIT_SLEEP", 60), step=10)
+        min_chars = c4.number_input("Min chars/chapter", 0, 5000, ei("MIN_CHARS_PER_CHAPTER", 500), step=100)
         updates.update({
             "MAX_RETRIES"           : str(max_ret),
             "SUCCESS_SLEEP"         : str(succ_s),
@@ -943,41 +947,79 @@ def render_settings() -> None:
     # ── TAB 2: Scout AI ────────────────────────────────────────────
     with tabs[2]:
         st.info(
-            "Scout chạy 3 việc mỗi N chương: sinh **Context Notes** (ngắn hạn), "
-            "append **Arc Memory** (dài hạn), cập nhật **Emotion Tracker**."
+            "Scout chạy 4 việc mỗi N chương: **Context Notes**, "
+            "**Arc Memory**, **Emotion Tracker**, **Glossary Suggest**."
         )
         c1, c2, c3 = st.columns(3)
         scout_ev = c1.slider("Scout refresh every", 1, 20, ei("SCOUT_REFRESH_EVERY", 5),
-                              help="SCOUT_REFRESH_EVERY — mỗi N chương chạy Scout")
+                              help="SCOUT_REFRESH_EVERY")
         scout_lb = c2.slider("Scout lookback",       2, 30, ei("SCOUT_LOOKBACK", 10),
-                              help="SCOUT_LOOKBACK — đọc N chương gần nhất")
+                              help="SCOUT_LOOKBACK")
         arc_win  = c3.slider("Arc memory window",    1, 10, ei("ARC_MEMORY_WINDOW", 3),
-                              help="ARC_MEMORY_WINDOW — số entry đưa vào prompt")
+                              help="ARC_MEMORY_WINDOW")
         updates.update({
             "SCOUT_REFRESH_EVERY": str(scout_ev),
             "SCOUT_LOOKBACK"     : str(scout_lb),
             "ARC_MEMORY_WINDOW"  : str(arc_win),
         })
 
-    # ── TAB 3: Nhân vật ────────────────────────────────────────────
+    # ── TAB 3: Glossary Suggest (mới) ─────────────────────────────
     with tabs[3]:
+        st.markdown("#### Scout Glossary Suggest")
+        st.caption(
+            "Scout AI tự động phát hiện thuật ngữ mới chưa có trong Glossary "
+            "và đề xuất vào Staging. Sau đó dùng **clean glossary** để xác nhận."
+        )
+
+        suggest_on = st.toggle(
+            "Bật Glossary Suggest",
+            value=eb("SCOUT_SUGGEST_GLOSSARY", True),
+            help="SCOUT_SUGGEST_GLOSSARY",
+        )
+        updates["SCOUT_SUGGEST_GLOSSARY"] = "true" if suggest_on else "false"
+
+        c1, c2 = st.columns(2)
+        min_conf = c1.slider(
+            "Confidence tối thiểu", 0.0, 1.0,
+            ef("SCOUT_SUGGEST_MIN_CONFIDENCE", 0.7),
+            step=0.05,
+            help="SCOUT_SUGGEST_MIN_CONFIDENCE — thuật ngữ dưới ngưỡng này bị bỏ qua",
+            disabled=not suggest_on,
+        )
+        max_terms = c2.number_input(
+            "Số thuật ngữ tối đa / lần Scout", 1, 50,
+            ei("SCOUT_SUGGEST_MAX_TERMS", 20),
+            help="SCOUT_SUGGEST_MAX_TERMS",
+            disabled=not suggest_on,
+        )
+        updates["SCOUT_SUGGEST_MIN_CONFIDENCE"] = str(round(min_conf, 2))
+        updates["SCOUT_SUGGEST_MAX_TERMS"]      = str(max_terms)
+
+        if suggest_on:
+            st.markdown("**Luồng hoạt động:**")
+            st.markdown(
+                "Scout chạy → phát hiện thuật ngữ chuyên biệt → lọc theo confidence "
+                f"≥ **{min_conf:.0%}** → dedup với glossary hiện có → "
+                "append vào **Staging_Terms.md** → bạn chạy **clean glossary** để xác nhận."
+            )
+        else:
+            st.warning("Glossary Suggest đang tắt — Scout sẽ không đề xuất thuật ngữ mới.")
+
+    # ── TAB 4: Nhân vật ────────────────────────────────────────────
+    with tabs[4]:
         st.markdown("#### Phân tầng Active / Archive")
         c1, c2 = st.columns(2)
         arch_a = c1.slider("Archive after chapters", 10, 200, ei("ARCHIVE_AFTER_CHAPTERS", 60),
-                            step=10, help="ARCHIVE_AFTER_CHAPTERS — không thấy N chương → archive")
+                            step=10, help="ARCHIVE_AFTER_CHAPTERS")
         emo_r  = c2.slider("Emotion reset chapters",  1, 20,  ei("EMOTION_RESET_CHAPTERS", 5),
-                            help="EMOTION_RESET_CHAPTERS — tự reset emotional_state về normal")
+                            help="EMOTION_RESET_CHAPTERS")
         updates.update({
             "ARCHIVE_AFTER_CHAPTERS": str(arch_a),
             "EMOTION_RESET_CHAPTERS": str(emo_r),
         })
-        st.caption(
-            "💡 `MIN_BEHAVIOR_CONF` (ngưỡng confidence habitual_behavior) "
-            "hiện hardcode = 0.65 trong `settings.py`. Sửa trực tiếp file để thay đổi."
-        )
 
-    # ── TAB 4: Token Budget ────────────────────────────────────────
-    with tabs[4]:
+    # ── TAB 5: Token Budget ────────────────────────────────────────
+    with tabs[5]:
         budget = st.number_input(
             "Budget limit (0 = tắt)", min_value=0, step=10000,
             value=ei("BUDGET_LIMIT", 150000), help="BUDGET_LIMIT",
@@ -1001,16 +1043,16 @@ def render_settings() -> None:
         ]:
             st.markdown(f"{badge} {desc}")
 
-    # ── TAB 5: Merge & Retry ───────────────────────────────────────
-    with tabs[5]:
+    # ── TAB 6: Merge & Retry ───────────────────────────────────────
+    with tabs[6]:
         st.markdown("#### Merge tự động")
         c1, c2, c3 = st.columns(3)
         imm  = c1.toggle("Immediate merge",       value=eb("IMMEDIATE_MERGE", True),
-                          help="IMMEDIATE_MERGE — Staging → Active ngay sau mỗi chương")
+                          help="IMMEDIATE_MERGE")
         ag   = c2.toggle("Auto merge glossary",   value=eb("AUTO_MERGE_GLOSSARY", False),
-                          help="AUTO_MERGE_GLOSSARY — tự clean glossary cuối pipeline")
+                          help="AUTO_MERGE_GLOSSARY")
         ac   = c3.toggle("Auto merge characters", value=eb("AUTO_MERGE_CHARACTERS", False),
-                          help="AUTO_MERGE_CHARACTERS — tự merge chars cuối pipeline")
+                          help="AUTO_MERGE_CHARACTERS")
         updates.update({
             "IMMEDIATE_MERGE"      : "true" if imm else "false",
             "AUTO_MERGE_GLOSSARY"  : "true" if ag  else "false",
@@ -1018,16 +1060,13 @@ def render_settings() -> None:
         })
 
         st.divider()
-        st.markdown("#### Retry pass")
         rfp = st.number_input("Retry failed passes", 0, 10, ei("RETRY_FAILED_PASSES", 3),
-                               help="RETRY_FAILED_PASSES — vòng retry cuối pipeline")
+                               help="RETRY_FAILED_PASSES")
         updates["RETRY_FAILED_PASSES"] = str(rfp)
 
-    # ── TAB 6: Đường dẫn ──────────────────────────────────────────
-    with tabs[6]:
+    # ── TAB 7: Đường dẫn ──────────────────────────────────────────
+    with tabs[7]:
         st.markdown("#### Thư mục làm việc")
-        st.caption("Đường dẫn tính từ thư mục gốc project. Hỗ trợ đường dẫn tuyệt đối.")
-
         _path_defs = [
             ("INPUT_DIR",   "inputs",  "File chương gốc (.txt / .md)"),
             ("OUTPUT_DIR",  "outputs", "Bản dịch (*_VN.txt)"),
@@ -1061,7 +1100,7 @@ def render_settings() -> None:
 def main() -> None:
     with st.sidebar:
         st.markdown("## 📖 LiTTrans")
-        st.caption("v4.2 — LitRPG / Tu Tiên Pipeline")
+        st.caption("v4.4 — LitRPG / Tu Tiên Pipeline")
         st.divider()
 
         _pages = {
@@ -1080,7 +1119,8 @@ def main() -> None:
                 st.rerun()
 
         st.divider()
-        # Quick progress in sidebar
+
+        # Quick progress + staging badge
         try:
             chs   = load_chapters()
             done  = sum(1 for c in chs if c["done"])
@@ -1088,6 +1128,20 @@ def main() -> None:
             if total:
                 st.progress(done / total)
                 st.caption(f"{done}/{total} chương")
+
+            # Badge: staging terms từ Scout Suggest
+            try:
+                from littrans.managers.glossary import glossary_stats
+                glos_s = glossary_stats()
+                staging_n = glos_s.get("staging", 0)
+                if staging_n:
+                    st.markdown(
+                        f'<span class="badge badge-warn">📖 {staging_n} thuật ngữ chờ phân loại</span>',
+                        unsafe_allow_html=True,
+                    )
+            except (Exception, SystemExit):
+                pass
+
         except Exception:
             pass
 
