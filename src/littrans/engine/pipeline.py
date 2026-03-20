@@ -1,18 +1,19 @@
 """
 src/littrans/engine/pipeline.py — Điều phối pipeline dịch tuần tự.
 
-Luồng:
+Luồng (USE_THREE_CALL=true — mặc định):
   ① Nạp tài liệu, lọc chương chưa dịch
   ② Vòng lặp tuần tự:
-       a. Scout refresh (nếu đến kỳ)
-       b. Dịch chương (translate_one)
-       c. Sync staging → Active
+       a. Scout refresh (nếu đến kỳ) + Pre-call
+       b. Translation call (plain text)
+       c. Post-call (review + auto_fix + metadata)
+       d. Retry Trans-call nếu Post báo retry_required
+       e. Sync staging → Active
   ③ Retry pass (RETRY_FAILED_PASSES vòng)
   ④ Final sync + Auto-merge + Tổng kết
 
-[v4.2] quality_failed: khi vẫn lỗi sau max_retries → ghi file nhưng KHÔNG cập nhật data.
-[v4.2] temperature tăng dần theo attempt: 0.4 → 0.5 → 0.6 (max 0.7).
-[v4.2] Log file cần review thủ công vào logs/review_needed.log.
+Luồng cũ (USE_THREE_CALL=false):
+  Giữ nguyên như v4.1 — 1 call nặng với structured JSON output.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ import os
 import re
 import time
 import logging
-import datetime
+import tempfile
 from pathlib import Path
 
 from littrans.config.settings import settings
@@ -33,34 +34,10 @@ from littrans.managers.skills     import load_skills_for_chapter, add_skill_upda
 from littrans.managers.name_lock  import build_name_lock_table, validate_translation, lock_stats
 from littrans.managers.memory     import load_recent as load_arc_memory
 from littrans.engine.scout        import run as scout_run, should_refresh, load_context_notes
-from littrans.engine.prompt_builder import build as build_prompt
+from littrans.engine.prompt_builder import build as build_prompt, build_translation_prompt
 from littrans.engine.quality_guard  import check as quality_check, build_retry_prompt
-from littrans.llm.client            import call_gemini, is_rate_limit, handle_api_error, key_pool
+from littrans.llm.client            import call_gemini, call_gemini_translation, is_rate_limit, handle_api_error, key_pool
 
-
-# ── Review log ────────────────────────────────────────────────────
-
-def _log_review_needed(filename: str, reason: str) -> None:
-    """Ghi vào logs/review_needed.log các chương cần kiểm tra thủ công."""
-    try:
-        settings.log_dir.mkdir(parents=True, exist_ok=True)
-        review_file = settings.log_dir / "review_needed.log"
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(review_file, "a", encoding="utf-8") as f:
-            f.write(f"[{ts}] {filename} — {reason}\n")
-    except Exception as e:
-        logging.error(f"_log_review_needed: {e}")
-
-
-def _retry_temperature(attempt: int) -> float:
-    """
-    Tăng nhiệt độ theo lần thử để tránh AI lặp lại cùng lỗi cũ.
-    attempt=1 → 0.40, attempt=2 → 0.50, attempt=3 → 0.60, attempt>=4 → 0.70
-    """
-    return min(0.4 + (attempt - 1) * 0.1, 0.7)
-
-
-# ── Pipeline ──────────────────────────────────────────────────────
 
 class Pipeline:
     """Singleton-like orchestrator. Tạo 1 instance, gọi .run() hoặc .retranslate()."""
@@ -70,6 +47,9 @@ class Pipeline:
         self._char_instructions = load_text(settings.prompt_character_file)
         if not self._char_instructions:
             print("⚠️  Không tìm thấy prompts/character_profile.md")
+
+        mode = "3-call" if settings.use_three_call else "1-call (legacy)"
+        print(f"  ⚙️  Pipeline mode: {mode}")
 
     # ── Public ────────────────────────────────────────────────────
 
@@ -158,20 +138,13 @@ class Pipeline:
 
     def translate_one(
         self,
-        filename       : str,
-        filepath       : str,
-        out_filepath   : str,
-        chapter_index  : int,
+        filename        : str,
+        filepath        : str,
+        out_filepath    : str,
+        chapter_index   : int,
         skip_data_update: bool = False,
     ) -> bool:
-        """
-        Dịch 1 chương. Trả về True nếu file được ghi thành công.
-
-        Khi quality vẫn fail sau max_retries:
-          - File vẫn được ghi (để kiểm tra thủ công)
-          - Data KHÔNG được cập nhật (glossary/chars/skills giữ nguyên)
-          - Ghi cảnh báo vào logs/review_needed.log
-        """
+        """Dịch 1 chương. Dispatch sang 3-call hoặc 1-call tùy settings."""
         text = load_text(filepath)
         if not text.strip():
             print(f"  ⚠️  File rỗng: {filename}"); return False
@@ -180,7 +153,194 @@ class Pipeline:
 
         print(f"\n▶  [{chapter_index+1}] Dịch: {filename}")
 
-        # Build context
+        if settings.use_three_call:
+            return self._translate_three_call(
+                filename, text, out_filepath, chapter_index, skip_data_update
+            )
+        else:
+            return self._translate_one_call(
+                filename, text, out_filepath, chapter_index, skip_data_update
+            )
+
+    # ── 3-call flow ───────────────────────────────────────────────
+
+    def _translate_three_call(
+        self,
+        filename        : str,
+        text            : str,
+        out_filepath    : str,
+        chapter_index   : int,
+        skip_data_update: bool,
+    ) -> bool:
+
+        # Chuẩn bị context (dùng chung cho Pre và Trans call)
+        glossary_ctx  = filter_glossary(text)
+        char_profiles = filter_characters(text)
+        arc_mem       = load_arc_memory()
+        ctx_notes     = load_context_notes()
+        name_lock     = build_name_lock_table()
+        known_skills  = load_skills_for_chapter(text)
+
+        total_terms = sum(len(v) for v in glossary_ctx.values())
+        print(f"     Glossary: {total_terms} · Characters: {len(char_profiles)} · "
+              f"Name Lock: {len(name_lock)} · Skills: {len(known_skills)}")
+
+        # ── Step 1: Pre-call ──────────────────────────────────────
+        print(f"  🔍 Pre-call...")
+        from littrans.engine.pre_processor import run as pre_run
+        chapter_map = pre_run(text, name_lock, char_profiles, known_skills)
+        if chapter_map.ok:
+            print(f"  ✅ Chapter map: {len(chapter_map.active_names)} tên · "
+                  f"{len(chapter_map.active_skills)} skill · "
+                  f"{len(chapter_map.pronoun_pairs)} pronoun pair"
+                  + (f" · {len(chapter_map.scene_warnings)} cảnh báo" if chapter_map.scene_warnings else ""))
+        else:
+            print(f"  ⚠️  Pre-call thất bại → dịch không có chapter map")
+
+        time.sleep(settings.pre_call_sleep)
+
+        # ── Step 2: Translation call + retry loop ─────────────────
+        system_prompt = build_translation_prompt(
+            instructions    = self._instructions,
+            glossary_ctx    = glossary_ctx,
+            char_profiles   = char_profiles,
+            arc_memory_text = arc_mem,
+            context_notes   = ctx_notes,
+            name_lock_table = name_lock,
+            known_skills    = known_skills,
+            chapter_map     = chapter_map,
+            budget_limit    = settings.budget_limit,
+            chapter_text    = text,
+        )
+
+        translation     = ""
+        retry_instruction = ""
+        trans_attempts  = 0
+        max_trans       = settings.max_retries
+
+        for attempt in range(1, max_trans + 1):
+            trans_attempts = attempt
+            try:
+                print(f"  ⚙️  Trans-call {attempt}/{max_trans} | {settings.gemini_model}")
+                input_text = (
+                    f"⚠️ RETRY — {retry_instruction}\n\n---\n\n{text}"
+                    if retry_instruction else text
+                )
+                translation = call_gemini_translation(system_prompt, input_text)
+
+                # Mechanical quality check (nhanh, không tốn API call)
+                ok_mech, mech_msg = quality_check(translation, text)
+                if not ok_mech:
+                    print(f"  ⚠️  Lỗi cơ học ({attempt}/{max_trans}): {mech_msg}")
+                    if attempt < max_trans:
+                        retry_instruction = mech_msg
+                        self._wait_quality(attempt)
+                        continue
+                    else:
+                        print(f"  ⚠️  Vẫn còn lỗi cơ học sau {max_trans} lần.")
+
+                break  # Translation pass — sang Post-call
+
+            except Exception as e:
+                logging.error(f"{filename} | trans attempt {attempt} | {e}")
+                print(f"  ❌ Trans lỗi {attempt}/{max_trans}: {e}")
+                handle_api_error(e)
+                if attempt >= max_trans:
+                    print(f"  🛑 Trans-call thất bại hoàn toàn."); return False
+                self._wait(e, attempt)
+
+        if not translation.strip():
+            print(f"  🛑 Translation rỗng."); return False
+
+        time.sleep(settings.post_call_sleep)
+
+        # ── Step 3: Post-call + retry loop ────────────────────────
+        from littrans.engine.post_analyzer import run as post_run
+
+        final_translation = translation
+        post_ok = False
+
+        for post_attempt in range(1, settings.post_call_max_retries + 2):
+            print(f"  🔎 Post-call {post_attempt}/{settings.post_call_max_retries + 1}...")
+            post_result = post_run(text, final_translation, chapter_map, filename)
+
+            if not post_result.ok:
+                # Post-call lỗi hoàn toàn — dùng bản dịch hiện tại và tiếp tục
+                print(f"  ⚠️  Post-call không hoạt động → dùng bản dịch hiện tại")
+                post_ok = True
+                break
+
+            # Log auto-fix
+            if post_result.auto_fixed:
+                fix_count = sum(1 for i in post_result.issues if i.severity == "auto_fix")
+                print(f"  🔧 Auto-fixed {fix_count} lỗi trình bày")
+                final_translation = post_result.final_translation
+
+            # Log issues
+            if post_result.issues:
+                for issue in post_result.issues:
+                    icon = "🔧" if issue.severity == "auto_fix" else "⚠️"
+                    print(f"     {icon} [{issue.type}] {issue.detail[:80]}")
+
+            if post_result.passed or not post_result.has_retry_required():
+                post_ok = True
+                break
+
+            # Có retry_required → retry Trans-call nếu còn lượt
+            if (settings.trans_retry_on_quality
+                    and post_attempt <= settings.post_call_max_retries):
+                print(f"  🔄 Retry Trans-call do lỗi dịch thuật...")
+                retry_instruction = post_result.retry_instruction
+                time.sleep(settings.post_call_sleep)
+
+                # Retry Trans-call
+                try:
+                    input_text = f"⚠️ RETRY — {retry_instruction}\n\n---\n\n{text}"
+                    final_translation = call_gemini_translation(system_prompt, input_text)
+                    time.sleep(settings.post_call_sleep)
+                except Exception as e:
+                    logging.error(f"{filename} | post retry trans | {e}")
+                    print(f"  ❌ Retry Trans lỗi: {e}")
+                    post_ok = True  # không block pipeline
+                    break
+            else:
+                # Hết lượt retry
+                print(f"  ⚠️  Vẫn còn lỗi dịch thuật sau {settings.post_call_max_retries} lần retry → ghi file để review")
+                final_translation = post_result.final_translation
+                post_ok = True
+                break
+
+        # ── Name Lock validate ────────────────────────────────────
+        violations = validate_translation(final_translation, name_lock)
+        if violations:
+            print(f"  🔒 Name Lock — {len(violations)} vi phạm:")
+            for w in violations: print(f"     {w}")
+            logging.warning(f"{filename} | Name Lock:\n" + "\n".join(violations))
+            self._record_violations(violations, name_lock, filename)
+
+        # ── Ghi file ──────────────────────────────────────────────
+        atomic_write(out_filepath, final_translation)
+        print(f"  ✅ Dịch xong: {filename}")
+
+        # ── Update data từ Post-call metadata ─────────────────────
+        if not skip_data_update and post_result.ok:
+            self._update_data_from_post(post_result, filename, chapter_index, char_profiles)
+
+        touch_seen(list(char_profiles.keys()), chapter_index)
+        time.sleep(settings.success_sleep)
+        return True
+
+    # ── 1-call flow (legacy) ──────────────────────────────────────
+
+    def _translate_one_call(
+        self,
+        filename        : str,
+        text            : str,
+        out_filepath    : str,
+        chapter_index   : int,
+        skip_data_update: bool,
+    ) -> bool:
+        """Flow cũ — giữ nguyên logic v4.1."""
         glossary_ctx  = filter_glossary(text)
         char_profiles = filter_characters(text)
         arc_mem       = load_arc_memory()
@@ -205,40 +365,28 @@ class Pipeline:
             chapter_text      = text,
         )
 
-        quality_warning  = ""
-        quality_failed   = False  # True khi vẫn còn lỗi sau max_retries
+        quality_warning = ""
 
         for attempt in range(1, settings.max_retries + 1):
             try:
-                temp = _retry_temperature(attempt)
-                temp_label = f" | temp={temp:.1f}" if attempt > 1 else ""
-                print(f"  ⚙️  API call {attempt}/{settings.max_retries} | {settings.gemini_model}{temp_label}")
-
+                print(f"  ⚙️  API call {attempt}/{settings.max_retries} | {settings.gemini_model}")
                 input_text = (
                     build_retry_prompt(text, quality_warning) if quality_warning else text
                 )
 
-                result = call_gemini(system_prompt, input_text, temperature=temp)
+                result = call_gemini(system_prompt, input_text)
 
-                # Quality check
                 ok, msg = quality_check(result.translation, text)
                 if not ok:
                     logging.warning(f"{filename} | attempt {attempt} | Quality: {msg}")
                     print(f"  ⚠️  Lỗi chất lượng ({attempt}/{settings.max_retries}): {msg}")
                     if attempt < settings.max_retries:
                         quality_warning = msg
-                        next_temp = _retry_temperature(attempt + 1)
-                        print(f"  🔄 Dịch lại (temp {next_temp:.1f})...")
                         self._wait_quality(attempt)
                         continue
                     else:
-                        # Hết lần thử — ghi file nhưng KHÔNG cập nhật data
-                        quality_failed = True
-                        print(f"  ⚠️  Vẫn còn lỗi sau {settings.max_retries} lần "
-                              f"— ghi file để kiểm tra thủ công.")
-                        _log_review_needed(filename, msg)
+                        print(f"  ⚠️  Vẫn còn lỗi sau {settings.max_retries} lần.")
 
-                # Name Lock validate
                 violations = validate_translation(result.translation, name_lock)
                 if violations:
                     print(f"  🔒 Name Lock — {len(violations)} vi phạm:")
@@ -246,16 +394,10 @@ class Pipeline:
                     logging.warning(f"{filename} | Name Lock:\n" + "\n".join(violations))
                     self._record_violations(violations, name_lock, filename)
 
-                # Write output
                 atomic_write(out_filepath, result.translation)
+                print(f"  ✅ Dịch xong: {filename}")
 
-                if quality_failed:
-                    print(f"  📄 Đã ghi: {filename} [⚠️ cần review — data KHÔNG cập nhật]")
-                else:
-                    print(f"  ✅ Dịch xong: {filename}")
-
-                # Cập nhật data CHỈ KHI bản dịch pass quality check
-                if not quality_failed and not skip_data_update:
+                if not skip_data_update:
                     n_terms = add_new_terms(result.new_terms, filename)
                     if n_terms: print(f"  📝 Thuật ngữ mới: {n_terms}")
 
@@ -271,10 +413,6 @@ class Pipeline:
                         print(f"  👤 Nhân vật mới: {n_chars} → {dest}")
                     if n_rels: print(f"  🔗 Quan hệ cập nhật: {n_rels}")
 
-                elif quality_failed:
-                    print(f"  ℹ️  Bỏ qua cập nhật Glossary / Characters / Skills.")
-
-                # touch_seen luôn chạy (nhân vật đã xuất hiện dù dịch tệ)
                 touch_seen(list(char_profiles.keys()), chapter_index)
                 time.sleep(settings.success_sleep)
                 return True
@@ -288,6 +426,62 @@ class Pipeline:
                 self._wait(e, attempt)
 
         return False
+
+    # ── Data update helpers ───────────────────────────────────────
+
+    def _update_data_from_post(self, post_result, filename, chapter_index, char_profiles):
+        """Update Master State từ metadata của Post-call."""
+        from littrans.llm.schemas import TermDetail, CharacterDetail, RelationshipUpdate, SkillUpdate
+
+        # new_terms — convert dict → TermDetail-compatible
+        if post_result.new_terms:
+            term_objects = []
+            for t in post_result.new_terms:
+                if isinstance(t, dict) and t.get("english"):
+                    try:
+                        term_objects.append(TermDetail(
+                            english    = t.get("english", ""),
+                            vietnamese = t.get("vietnamese", ""),
+                            category   = t.get("category", "general"),
+                        ))
+                    except Exception:
+                        pass
+            if term_objects:
+                n = add_new_terms(term_objects, filename)
+                if n: print(f"  📝 Thuật ngữ mới: {n}")
+
+        # skill_updates — convert dict → SkillUpdate-compatible
+        if post_result.skill_updates:
+            skill_objects = []
+            for s in post_result.skill_updates:
+                if isinstance(s, dict) and s.get("english"):
+                    try:
+                        skill_objects.append(SkillUpdate(
+                            english      = s.get("english", ""),
+                            vietnamese   = s.get("vietnamese", ""),
+                            owner        = s.get("owner", ""),
+                            skill_type   = s.get("skill_type", "active"),
+                            evolved_from = s.get("evolved_from", ""),
+                        ))
+                    except Exception:
+                        pass
+            if skill_objects:
+                n = add_skill_updates(skill_objects, filename)
+                if n: print(f"  ⚔️  Kỹ năng mới: {n}")
+
+        # new_characters + relationship_updates — xử lý đơn giản
+        # Post-call trả về dict thô, cần convert sang schema objects
+        # Giữ nhẹ: chỉ log, việc profile đầy đủ để clean characters xử lý
+        if post_result.new_characters:
+            print(f"  👤 Nhân vật mới phát hiện: {len(post_result.new_characters)} "
+                  f"→ chạy 'clean characters --action merge' để xử lý")
+            # Log để người dùng biết
+            for c in post_result.new_characters:
+                name = c.get("name") or c.get("original", "?")
+                logging.info(f"[PostAnalyzer] Nhân vật mới: {name} | {filename}")
+
+        if post_result.relationship_updates:
+            print(f"  🔗 Quan hệ cập nhật: {len(post_result.relationship_updates)}")
 
     # ── Helpers ───────────────────────────────────────────────────
 
@@ -390,18 +584,11 @@ class Pipeline:
             "tắt" if settings.budget_limit == 0
             else f"{settings.budget_limit:,} token"
         )
-        # Hiển thị danh sách review_needed nếu có
-        review_file = settings.log_dir / "review_needed.log"
-        review_count = 0
-        if review_file.exists():
-            try:
-                review_count = sum(1 for _ in open(review_file, encoding="utf-8"))
-            except Exception:
-                pass
-
+        mode_str = "3-call (pre+trans+post)" if settings.use_three_call else "1-call (legacy)"
         print(f"\n{'═'*62}")
         print(f"  Pipeline Dịch Truyện v4.2 — {settings.gemini_model}")
         print(f"{'─'*62}")
+        print(f"  Mode             : {mode_str}")
         print(f"  Tổng chương      : {len(all_files)}")
         print(f"  Cần dịch         : {len(pending)}")
         print(f"  Nhân vật Active  : {stats['active']}"
@@ -414,14 +601,11 @@ class Pipeline:
         print(f"  Scout            : mỗi {settings.scout_refresh_every} chương, đọc {settings.scout_lookback}")
         print(f"  Merge mode       : {'Ngay sau mỗi chương' if settings.immediate_merge else 'Cuối pipeline'}")
         print(f"  Retry passes     : {settings.retry_failed_passes}")
-        if review_count:
-            print(f"  ⚠️  Cần review    : {review_count} chương (xem logs/review_needed.log)")
         print(f"{'═'*62}\n")
 
     def _print_summary(self, total_ok: int, total_fail: int, failed: list) -> None:
         remaining = [fn for _, fn, _, op in failed if not os.path.exists(op)]
         kp = key_pool.stats()
-        review_file = settings.log_dir / "review_needed.log"
         print(f"\n{'═'*62}")
         print(f"  ✅ Thành công : {total_ok} chương")
         print(f"  ❌ Thất bại   : {len(remaining)} chương")
@@ -429,6 +613,4 @@ class Pipeline:
             for fn in remaining: print(f"     • {fn}")
         if kp['total_keys'] > 1:
             print(f"  🔑 Keys: {kp['total_keys']} · {kp['dead_keys']} exhausted · final #{kp['active_idx']+1}")
-        if review_file.exists():
-            print(f"  ⚠️  Xem logs/review_needed.log để biết chương cần review thủ công.")
         print(f"{'═'*62}")

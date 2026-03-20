@@ -9,13 +9,20 @@ Chỉnh qua .env, KHÔNG sửa file này.
     FALLBACK_KEY_1=AIza...
     FALLBACK_KEY_2=AIza...
     KEY_ROTATE_THRESHOLD=3
-    GEMINI_MODEL=gemini-2.5-flash
+    GEMINI_MODEL=gemini-2.0-flash-exp
 
     # Pipeline
     MAX_RETRIES=5
     SUCCESS_SLEEP=30
     RATE_LIMIT_SLEEP=60
     MIN_CHARS_PER_CHAPTER=500
+
+    # 3-Call Architecture
+    USE_THREE_CALL=true
+    PRE_CALL_SLEEP=5
+    POST_CALL_SLEEP=5
+    POST_CALL_MAX_RETRIES=2
+    TRANS_RETRY_ON_QUALITY=true
 
     # Scout
     SCOUT_LOOKBACK=10
@@ -71,7 +78,7 @@ class Settings:
     fallback_key_1        : str  = field(default_factory=lambda: _env("FALLBACK_KEY_1"))
     fallback_key_2        : str  = field(default_factory=lambda: _env("FALLBACK_KEY_2"))
     key_rotate_threshold  : int  = field(default_factory=lambda: _env_int("KEY_ROTATE_THRESHOLD", 3))
-    gemini_model          : str  = field(default_factory=lambda: _env("GEMINI_MODEL", "gemini-2.5-flash"))
+    gemini_model          : str  = field(default_factory=lambda: _env("GEMINI_MODEL", "gemini-2.0-flash-exp"))
 
     # ── Pipeline ─────────────────────────────────────────────────
     max_retries           : int  = field(default_factory=lambda: _env_int("MAX_RETRIES", 5))
@@ -79,6 +86,20 @@ class Settings:
     rate_limit_sleep      : int  = field(default_factory=lambda: _env_int("RATE_LIMIT_SLEEP", 60))
     min_chars_per_chapter : int  = field(default_factory=lambda: _env_int("MIN_CHARS_PER_CHAPTER", 500))
     min_behavior_conf     : float = 0.65
+
+    # ── 3-Call Architecture ───────────────────────────────────────
+    # Bật/tắt toàn bộ 3-call flow. False = giữ nguyên flow cũ 1-call.
+    use_three_call        : bool = field(default_factory=lambda: _env_bool("USE_THREE_CALL", True))
+
+    # Sleep giữa các call trong cùng 1 chương — tránh TPM spike
+    pre_call_sleep        : int  = field(default_factory=lambda: _env_int("PRE_CALL_SLEEP", 5))
+    post_call_sleep       : int  = field(default_factory=lambda: _env_int("POST_CALL_SLEEP", 5))
+
+    # Số lần retry Trans-call khi Post-call phát hiện retry_required
+    post_call_max_retries : int  = field(default_factory=lambda: _env_int("POST_CALL_MAX_RETRIES", 2))
+
+    # Có retry Trans-call khi Post-call báo lỗi dịch thuật không
+    trans_retry_on_quality: bool = field(default_factory=lambda: _env_bool("TRANS_RETRY_ON_QUALITY", True))
 
     # ── Scout ────────────────────────────────────────────────────
     scout_lookback        : int  = field(default_factory=lambda: _env_int("SCOUT_LOOKBACK", 10))
@@ -111,7 +132,8 @@ class Settings:
 
         # Đảm bảo thư mục tồn tại
         for p in [self.input_dir, self.output_dir, self.data_dir, self.log_dir,
-                  self.glossary_dir, self.char_dir, self.memory_dir, self.skills_file.parent]:
+                  self.glossary_dir, self.char_dir, self.memory_dir,
+                  self.skills_file.parent]:
             p.mkdir(parents=True, exist_ok=True)
 
         # Logging

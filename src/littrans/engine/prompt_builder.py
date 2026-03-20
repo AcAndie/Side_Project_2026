@@ -1,7 +1,13 @@
 """
-src/littrans/engine/prompt_builder.py — Xây dựng system prompt 8 phần.
+src/littrans/engine/prompt_builder.py — Xây dựng system prompt.
 
-Cấu trúc:
+Hai entry points:
+  build()                   → prompt đầy đủ 8 phần (flow cũ — 1 call)
+  build_translation_prompt() → prompt dịch thuần túy (3-call flow — Trans-call)
+                               không có JSON_OUTPUT section
+                               có thêm Chapter Map từ Pre-call
+
+Cấu trúc build() — 8 phần:
   1. Hướng dẫn dịch chung  (prompts/system_agent.md)
   2. Glossary + Skills đã biết
   3. Character profiles (+ Emotion warning)
@@ -9,9 +15,19 @@ Cấu trúc:
   5. Yêu cầu JSON output
   6. Arc Memory (N entry gần nhất)
   7. Context Notes Scout AI
-  8. Name Lock Table  ← ràng buộc CỨNG nhất, để CUỐI
+  8. Name Lock Table
 
-[v4] Token Budget: nếu budget_limit > 0 → smart truncation trước khi assemble.
+Cấu trúc build_translation_prompt() — 8 phần (khác phần 4 và 5):
+  1. Hướng dẫn dịch chung
+  2. Glossary + Skills đã biết
+  3. Character profiles
+  4. Chapter Map (từ Pre-call) ← thay thế character_profile.md
+  5. Yêu cầu output (plain text, không JSON) ← đơn giản hơn nhiều
+  6. Arc Memory
+  7. Context Notes Scout AI
+  8. Name Lock Table
+
+[v4] Token Budget: nếu budget_limit > 0 → smart truncation.
 """
 from __future__ import annotations
 
@@ -29,6 +45,10 @@ _CAT_LABELS = {
 }
 
 
+# ═══════════════════════════════════════════════════════════════════
+# PUBLIC — Flow cũ (1 call)
+# ═══════════════════════════════════════════════════════════════════
+
 def build(
     instructions     : str,
     glossary_ctx     : dict[str, list[str]],
@@ -41,37 +61,15 @@ def build(
     budget_limit     : int = 0,
     chapter_text     : str = "",
 ) -> str:
-    """Assemble system prompt. budget_limit > 0 → apply token budget truncation."""
+    """
+    Assemble system prompt đầy đủ 8 phần.
+    Dùng cho flow cũ (USE_THREE_CALL=false).
+    """
+    glossary_ctx, char_profiles, arc_memory_text = _apply_budget_if_needed(
+        budget_limit, instructions, char_instructions, name_lock_table or {},
+        context_notes, arc_memory_text, char_profiles, glossary_ctx, chapter_text,
+    )
 
-    # ── Token Budget ──────────────────────────────────────────────
-    if budget_limit > 0:
-        import re as _re
-        from littrans.llm.token_budget import BudgetContext, apply_budget
-        from littrans.managers.name_lock import format_for_prompt as fmt_lock
-
-        arc_entries = (
-            [e for e in _re.split(r"\n---\n", arc_memory_text)
-             if e.strip().startswith("## Arc:")]
-            if arc_memory_text else []
-        )
-        ctx = BudgetContext(
-            instructions      = instructions,
-            char_instructions = char_instructions,
-            name_lock         = fmt_lock(name_lock_table or {}),
-            context_notes     = context_notes,
-            arc_memory_text   = arc_memory_text,
-            arc_entries_full  = arc_entries,
-            char_profiles     = dict(char_profiles),
-            glossary_ctx      = {k: list(v) for k, v in glossary_ctx.items()},
-            chapter_text      = chapter_text,
-            budget_limit      = budget_limit,
-        )
-        ctx            = apply_budget(ctx)
-        arc_memory_text = ctx.arc_memory_text
-        char_profiles   = ctx.char_profiles
-        glossary_ctx    = ctx.glossary_ctx
-
-    # ── Assemble ─────────────────────────────────────────────────
     parts = [
         "Bạn là AI Agent chuyên dịch truyện LitRPG / Tu Tiên từ tiếng Anh sang tiếng Việt.\n",
         _section("PHẦN 1 — HƯỚNG DẪN DỊCH", instructions),
@@ -81,18 +79,7 @@ def build(
         _section("PHẦN 5 — YÊU CẦU ĐẦU RA JSON",  _json_requirements()),
     ]
 
-    if arc_memory_text and arc_memory_text.strip():
-        parts.append(_section(
-            f"PHẦN 6 — BỘ NHỚ ARC ({settings.arc_memory_window} entry gần nhất)",
-            "Bối cảnh dài hạn. Dùng để đảm bảo tính nhất quán xuyên suốt.\n\n" + arc_memory_text,
-        ))
-
-    if context_notes and context_notes.strip():
-        parts.append(_section(
-            f"PHẦN 7 — GHI CHÚ TỨC THÌ (Scout AI · {settings.scout_lookback} chương gần nhất)",
-            "⚠️  ĐỌC KỸ TRƯỚC KHI DỊCH. Ưu tiên tuyệt đối cảnh báo xưng hô và mạch truyện đặc biệt.\n\n"
-            + context_notes,
-        ))
+    parts += _arc_and_notes_sections(arc_memory_text, context_notes)
 
     from littrans.managers.name_lock import format_for_prompt as fmt_lock
     parts.append(_section(
@@ -103,10 +90,97 @@ def build(
     return "\n\n".join(parts)
 
 
-# ── Section formatters ────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════
+# PUBLIC — 3-call flow (Translation call)
+# ═══════════════════════════════════════════════════════════════════
+
+def build_translation_prompt(
+    instructions    : str,
+    glossary_ctx    : dict[str, list[str]],
+    char_profiles   : dict[str, str],
+    arc_memory_text : str = "",
+    context_notes   : str = "",
+    name_lock_table : dict[str, str] | None = None,
+    known_skills    : dict[str, dict] | None = None,
+    chapter_map     = None,   # ChapterMap | None
+    budget_limit    : int = 0,
+    chapter_text    : str = "",
+) -> str:
+    """
+    Assemble system prompt cho Translation call (3-call flow).
+
+    Khác build():
+      - Phần 4: Chapter Map thay vì character_profile.md
+      - Phần 5: Yêu cầu plain text, không JSON schema
+      - Không có char_instructions (không cần profile nhân vật mới)
+    """
+    glossary_ctx, char_profiles, arc_memory_text = _apply_budget_if_needed(
+        budget_limit, instructions, "",
+        name_lock_table or {}, context_notes, arc_memory_text,
+        char_profiles, glossary_ctx, chapter_text,
+    )
+
+    parts = [
+        "Bạn là AI chuyên dịch truyện LitRPG / Tu Tiên từ tiếng Anh sang tiếng Việt.\n"
+        "Nhiệm vụ DUY NHẤT: dịch chapter được cung cấp. "
+        "KHÔNG điền JSON, KHÔNG phân tích, KHÔNG thêm chú thích.\n",
+        _section("PHẦN 1 — HƯỚNG DẪN DỊCH", instructions),
+        _section("PHẦN 2 — TỪ ĐIỂN THUẬT NGỮ", _fmt_glossary(glossary_ctx, known_skills or {})),
+        _section("PHẦN 3 — PROFILE NHÂN VẬT",   _fmt_characters(char_profiles)),
+    ]
+
+    # Phần 4: Chapter Map (nếu có) — thông tin đã được pre-analyze
+    if chapter_map and not chapter_map.is_empty():
+        parts.append(_section(
+            "PHẦN 4 — CHAPTER MAP (đã phân tích trước — ưu tiên cao)",
+            chapter_map.to_prompt_block(),
+        ))
+    else:
+        parts.append(_section(
+            "PHẦN 4 — GHI CHÚ CHAPTER",
+            "Không có chapter map. Suy luận xưng hô và tên từ các phần trên.",
+        ))
+
+    # Phần 5: Yêu cầu output plain text
+    parts.append(_section(
+        "PHẦN 5 — YÊU CẦU ĐẦU RA",
+        _translation_output_requirements(),
+    ))
+
+    parts += _arc_and_notes_sections(arc_memory_text, context_notes)
+
+    from littrans.managers.name_lock import format_for_prompt as fmt_lock
+    parts.append(_section(
+        "PHẦN 8 — NAME LOCK TABLE (bảng tên đã chốt — BẮT BUỘC tuân theo)",
+        fmt_lock(name_lock_table or {}),
+    ))
+
+    return "\n\n".join(parts)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SHARED HELPERS
+# ═══════════════════════════════════════════════════════════════════
 
 def _section(title: str, body: str) -> str:
     return f"{_BAR}\n {title}\n{_BAR}\n{body.strip()}"
+
+
+def _arc_and_notes_sections(arc_memory_text: str, context_notes: str) -> list[str]:
+    """Phần 6 và 7 — dùng chung cho cả 2 prompt."""
+    parts = []
+    if arc_memory_text and arc_memory_text.strip():
+        parts.append(_section(
+            f"PHẦN 6 — BỘ NHỚ ARC ({settings.arc_memory_window} entry gần nhất)",
+            "Bối cảnh dài hạn. Dùng để đảm bảo tính nhất quán xuyên suốt.\n\n" + arc_memory_text,
+        ))
+    if context_notes and context_notes.strip():
+        parts.append(_section(
+            f"PHẦN 7 — GHI CHÚ TỨC THÌ (Scout AI · {settings.scout_lookback} chương gần nhất)",
+            "⚠️  ĐỌC KỸ TRƯỚC KHI DỊCH. Ưu tiên tuyệt đối cảnh báo xưng hô và mạch truyện đặc biệt.\n\n"
+            + context_notes,
+        ))
+    return parts
 
 
 def _fmt_glossary(ctx: dict[str, list[str]], known_skills: dict[str, dict]) -> str:
@@ -151,6 +225,7 @@ def _fmt_characters(profiles: dict[str, str]) -> str:
 
 
 def _json_requirements() -> str:
+    """Dùng cho flow cũ (1 call)."""
     return (
         "Trả về JSON với ĐÚNG 5 trường sau. KHÔNG bỏ sót trường nào:\n\n"
         "1. `translation`\n"
@@ -165,3 +240,50 @@ def _json_requirements() -> str:
         "5. `skill_updates`\n"
         "   Kỹ năng MỚI hoặc TIẾN HÓA lần đầu. Kỹ năng đã có → KHÔNG báo cáo lại. Nếu không có → []."
     )
+
+
+def _translation_output_requirements() -> str:
+    """Dùng cho Translation call (3-call flow)."""
+    return (
+        "Trả về BẢN DỊCH HOÀN CHỈNH — plain text, không JSON, không markdown code block.\n\n"
+        "Quy tắc:\n"
+        "  • Giữ nguyên cấu trúc đoạn văn của bản gốc\n"
+        "  • Mỗi đoạn văn gốc = một đoạn trong bản dịch\n"
+        "  • Dòng trống giữa các đoạn thường — giữ nguyên như gốc\n"
+        "  • Bảng hệ thống / System Box — KHÔNG có dòng trống giữa các dòng trong box\n"
+        "  • KHÔNG thêm lời mở đầu, kết luận, hay chú thích vào bản dịch\n"
+        "  • KHÔNG bọc bản dịch trong dấu ngoặc kép hay code block"
+    )
+
+
+def _apply_budget_if_needed(
+    budget_limit, instructions, char_instructions, name_lock_table,
+    context_notes, arc_memory_text, char_profiles, glossary_ctx, chapter_text,
+):
+    """Áp dụng token budget nếu cần. Trả về (glossary_ctx, char_profiles, arc_memory_text) đã cắt."""
+    if budget_limit <= 0:
+        return glossary_ctx, char_profiles, arc_memory_text
+
+    import re as _re
+    from littrans.llm.token_budget import BudgetContext, apply_budget
+    from littrans.managers.name_lock import format_for_prompt as fmt_lock
+
+    arc_entries = (
+        [e for e in _re.split(r"\n---\n", arc_memory_text)
+         if e.strip().startswith("## Arc:")]
+        if arc_memory_text else []
+    )
+    ctx = BudgetContext(
+        instructions      = instructions,
+        char_instructions = char_instructions,
+        name_lock         = fmt_lock(name_lock_table),
+        context_notes     = context_notes,
+        arc_memory_text   = arc_memory_text,
+        arc_entries_full  = arc_entries,
+        char_profiles     = dict(char_profiles),
+        glossary_ctx      = {k: list(v) for k, v in glossary_ctx.items()},
+        chapter_text      = chapter_text,
+        budget_limit      = budget_limit,
+    )
+    ctx = apply_budget(ctx)
+    return ctx.glossary_ctx, ctx.char_profiles, ctx.arc_memory_text

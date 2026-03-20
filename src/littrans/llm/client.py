@@ -7,8 +7,11 @@ ApiKeyPool quản lý nhiều API key (primary + fallbacks).
   - Nếu tất cả key dead → AllKeysExhaustedError
   - Singleton key_pool dùng xuyên suốt pipeline
 
-[v4.2] Timeout 300s cho mọi API call — tránh hang vô hạn.
-[v4.2] call_gemini nhận temperature param — retry có thể tăng dần.
+Call functions:
+  call_gemini()             → structured JSON (TranslationResult) — flow cũ
+  call_gemini_translation() → plain text bản dịch — dùng trong 3-call flow
+  call_gemini_text()        → plain text tự do (Scout, Arc Memory)
+  call_gemini_json()        → free JSON (Emotion, Glossary, Pre-call, Post-call)
 """
 from __future__ import annotations
 
@@ -16,7 +19,6 @@ import re
 import json
 import logging
 import threading
-import concurrent.futures
 from pydantic import ValidationError
 from google import genai
 from google.genai import types
@@ -25,22 +27,12 @@ from littrans.config.settings import settings
 from littrans.llm.schemas import TranslationResult, GEMINI_SCHEMA
 
 
-# ── Constants ─────────────────────────────────────────────────────
-
-_API_TIMEOUT = 300      # giây — timeout cho mỗi API call
-_MAX_WORKERS  = 1       # ThreadPoolExecutor workers
-
-
 # ═══════════════════════════════════════════════════════════════════
 # EXCEPTIONS
 # ═══════════════════════════════════════════════════════════════════
 
 class AllKeysExhaustedError(Exception):
     """Tất cả API key đều hết quota."""
-
-
-class ApiTimeoutError(TimeoutError):
-    """Gemini API không phản hồi trong thời gian cho phép."""
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -116,53 +108,24 @@ key_pool = ApiKeyPool(settings.gemini_api_keys, rotate_threshold=settings.key_ro
 
 
 # ═══════════════════════════════════════════════════════════════════
-# TIMEOUT WRAPPER
-# ═══════════════════════════════════════════════════════════════════
-
-def _with_timeout(fn, *args, timeout: int = _API_TIMEOUT, **kwargs):
-    """
-    Chạy fn(*args, **kwargs) với timeout.
-    Raise ApiTimeoutError nếu vượt quá thời gian.
-    """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
-        future = executor.submit(fn, *args, **kwargs)
-        try:
-            return future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            raise ApiTimeoutError(
-                f"Gemini API không phản hồi sau {timeout}s. "
-                "Kiểm tra mạng hoặc giảm kích thước prompt."
-            )
-
-
-# ═══════════════════════════════════════════════════════════════════
 # PUBLIC CALL FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════
 
-def call_gemini(
-    system_prompt : str,
-    chapter_text  : str,
-    temperature   : float = 0.4,
-) -> TranslationResult:
+def call_gemini(system_prompt: str, chapter_text: str) -> TranslationResult:
     """
-    Gọi Gemini với structured output → TranslationResult.
-    Raise exception khi thất bại (caller quyết định retry).
-
-    temperature: 0.4 mặc định, pipeline có thể tăng dần khi retry.
+    Flow cũ — Gọi Gemini với structured output → TranslationResult.
+    Giữ nguyên để backward compatible khi USE_THREE_CALL=false.
     """
-    def _call():
-        return key_pool.current_client.models.generate_content(
-            model=settings.gemini_model,
-            contents=chapter_text,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=min(max(temperature, 0.0), 1.0),
-                response_schema=GEMINI_SCHEMA,
-                response_mime_type="application/json",
-            ),
-        )
-
-    response = _with_timeout(_call)
+    response = key_pool.current_client.models.generate_content(
+        model=settings.gemini_model,
+        contents=chapter_text,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=0.4,
+            response_schema=GEMINI_SCHEMA,
+            response_mime_type="application/json",
+        ),
+    )
 
     if hasattr(response, "usage_metadata") and response.usage_metadata:
         u = response.usage_metadata
@@ -177,50 +140,77 @@ def call_gemini(
     return result
 
 
+def call_gemini_translation(system_prompt: str, chapter_text: str) -> str:
+    """
+    3-call flow — Translation call: chỉ dịch, output plain text.
+
+    Khác call_gemini():
+      - Không dùng response_schema / response_mime_type
+      - Output là plain text bản dịch, không phải JSON
+      - Caller (pipeline) tự validate chất lượng
+
+    Raise exception khi thất bại (caller quyết định retry).
+    """
+    response = key_pool.current_client.models.generate_content(
+        model=settings.gemini_model,
+        contents=chapter_text,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=0.4,
+        ),
+    )
+
+    if hasattr(response, "usage_metadata") and response.usage_metadata:
+        u = response.usage_metadata
+        _log_tokens(
+            getattr(u, "prompt_token_count", "?"),
+            getattr(u, "candidates_token_count", "?"),
+            getattr(u, "total_token_count", "?"),
+        )
+
+    text = response.text or ""
+    if not text.strip():
+        raise ValueError("Translation call trả về text rỗng.")
+
+    key_pool.on_success()
+    return text
+
+
 def call_gemini_text(system_prompt: str, user_text: str) -> str:
     """
     Gọi Gemini đơn giản (Scout, Arc Memory) → plain text.
     Không dùng structured output.
     """
-    def _call():
-        return key_pool.current_client.models.generate_content(
-            model=settings.gemini_model,
-            contents=user_text,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=0.2,
-            ),
-        )
-
-    response = _with_timeout(_call)
+    response = key_pool.current_client.models.generate_content(
+        model=settings.gemini_model,
+        contents=user_text,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=0.2,
+        ),
+    )
     key_pool.on_success()
     return response.text or ""
 
 
 def call_gemini_json(system_prompt: str, user_text: str) -> dict:
     """
-    Gọi Gemini với yêu cầu trả về JSON tự do (Emotion Tracker, clean_glossary).
+    Gọi Gemini với yêu cầu trả về JSON tự do.
+    Dùng cho: Emotion Tracker, clean_glossary, Pre-call, Post-call.
     """
-    def _call():
-        return key_pool.current_client.models.generate_content(
-            model=settings.gemini_model,
-            contents=user_text,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=0.1,
-                response_mime_type="application/json",
-            ),
-        )
-
-    response = _with_timeout(_call)
+    response = key_pool.current_client.models.generate_content(
+        model=settings.gemini_model,
+        contents=user_text,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=0.1,
+            response_mime_type="application/json",
+        ),
+    )
     key_pool.on_success()
     raw   = response.text or "{}"
     clean = re.sub(r"^```json\s*|```\s*$", "", raw.strip(), flags=re.MULTILINE)
-    try:
-        return json.loads(clean)
-    except json.JSONDecodeError as e:
-        logging.error(f"[call_gemini_json] JSON decode error: {e}\nRaw: {raw[:200]}")
-        return {}
+    return json.loads(clean)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -251,9 +241,6 @@ def _parse_response(response) -> TranslationResult:
     raw  = response.text or ""
     text = re.sub(r"^```json\s*|```\s*$", "", raw.strip(), flags=re.MULTILINE)
 
-    if not text:
-        raise ValueError("Response rỗng — không có nội dung để parse.")
-
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
@@ -266,12 +253,6 @@ def _parse_response(response) -> TranslationResult:
 
     if not result.translation.strip():
         raise ValueError("Bản dịch rỗng sau parse.")
-
-    # Lọc new_characters rỗng/thiếu tên — tránh lưu garbage vào DB
-    result.new_characters = [
-        c for c in result.new_characters
-        if c.name and c.name.strip() and len(c.name.strip()) >= 2
-    ]
 
     return result
 
