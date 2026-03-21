@@ -6,28 +6,21 @@ Hai entry points:
   build_translation_prompt() → prompt dịch thuần túy (3-call flow — Trans-call)
                                không có JSON_OUTPUT section
                                có thêm Chapter Map từ Pre-call
+                               có thêm EPS summary (v5.0)
 
-Cấu trúc build() — 8 phần:
-  1. Hướng dẫn dịch chung  (prompts/system_agent.md)
-  2. Glossary + Skills đã biết
-  3. Character profiles (+ Emotion warning)
-  4. Hướng dẫn lập profile  (prompts/character_profile.md)
-  5. Yêu cầu JSON output
-  6. Arc Memory (N entry gần nhất)
-  7. Context Notes Scout AI
-  8. Name Lock Table
-
-Cấu trúc build_translation_prompt() — 8 phần (khác phần 4 và 5):
+Cấu trúc build_translation_prompt() — 9 phần (thêm EPS so với v4):
   1. Hướng dẫn dịch chung
   2. Glossary + Skills đã biết
-  3. Character profiles
-  4. Chapter Map (từ Pre-call) ← thay thế character_profile.md
-  5. Yêu cầu output (plain text, không JSON) ← đơn giản hơn nhiều
+  3. Character profiles (+ Emotion warning + EPS)  ← v5.0: thêm EPS block
+  4. Chapter Map (từ Pre-call: tên/skill/pronoun + Scene Plan)  ← v5.0: Scene Plan
+  5. Yêu cầu output (plain text)
   6. Arc Memory
   7. Context Notes Scout AI
   8. Name Lock Table
 
 [v4] Token Budget: nếu budget_limit > 0 → smart truncation.
+[v5.0] Inject EPS summary sau Character profiles.
+       Inject Scene Plan từ ChapterMap (pov, beats, tone).
 """
 from __future__ import annotations
 
@@ -61,10 +54,6 @@ def build(
     budget_limit     : int = 0,
     chapter_text     : str = "",
 ) -> str:
-    """
-    Assemble system prompt đầy đủ 8 phần.
-    Dùng cho flow cũ (USE_THREE_CALL=false).
-    """
     glossary_ctx, char_profiles, arc_memory_text = _apply_budget_if_needed(
         budget_limit, instructions, char_instructions, name_lock_table or {},
         context_notes, arc_memory_text, char_profiles, glossary_ctx, chapter_text,
@@ -109,10 +98,7 @@ def build_translation_prompt(
     """
     Assemble system prompt cho Translation call (3-call flow).
 
-    Khác build():
-      - Phần 4: Chapter Map thay vì character_profile.md
-      - Phần 5: Yêu cầu plain text, không JSON schema
-      - Không có char_instructions (không cần profile nhân vật mới)
+    v5.0: Thêm EPS summary vào Phần 3 và Scene Plan vào Phần 4.
     """
     glossary_ctx, char_profiles, arc_memory_text = _apply_budget_if_needed(
         budget_limit, instructions, "",
@@ -126,10 +112,24 @@ def build_translation_prompt(
         "KHÔNG điền JSON, KHÔNG phân tích, KHÔNG thêm chú thích.\n",
         _section("PHẦN 1 — HƯỚNG DẪN DỊCH", instructions),
         _section("PHẦN 2 — TỪ ĐIỂN THUẬT NGỮ", _fmt_glossary(glossary_ctx, known_skills or {})),
-        _section("PHẦN 3 — PROFILE NHÂN VẬT",   _fmt_characters(char_profiles)),
     ]
 
-    # Phần 4: Chapter Map (nếu có) — thông tin đã được pre-analyze
+    # Phần 3: Character profiles + EPS summary
+    char_body = _fmt_characters(char_profiles)
+
+    # Inject EPS summary nếu có dữ liệu
+    if char_profiles and chapter_text:
+        try:
+            from littrans.managers.characters import format_eps_summary
+            eps_block = format_eps_summary(char_profiles, chapter_text)
+            if eps_block:
+                char_body = char_body + "\n\n" + eps_block
+        except Exception:
+            pass  # EPS là optional — không block nếu lỗi
+
+    parts.append(_section("PHẦN 3 — PROFILE NHÂN VẬT", char_body))
+
+    # Phần 4: Chapter Map (tên/skill/pronoun + Scene Plan)
     if chapter_map and not chapter_map.is_empty():
         parts.append(_section(
             "PHẦN 4 — CHAPTER MAP (đã phân tích trước — ưu tiên cao)",
@@ -167,7 +167,6 @@ def _section(title: str, body: str) -> str:
 
 
 def _arc_and_notes_sections(arc_memory_text: str, context_notes: str) -> list[str]:
-    """Phần 6 và 7 — dùng chung cho cả 2 prompt."""
     parts = []
     if arc_memory_text and arc_memory_text.strip():
         parts.append(_section(
@@ -219,13 +218,18 @@ def _fmt_characters(profiles: dict[str, str]) -> str:
         "  2. relationships[X].dynamic (🔸 weak)   → tạm thời; báo cáo promote_to_strong khi xác nhận\n"
         "  3. how_refers_to_others[X]              → fallback khi chưa có quan hệ\n"
         "  4. how_refers_to_others[default_*]      → fallback cuối\n\n"
-        "  ⛔ Chỉ đổi xưng hô khi: phản bội / tra khảo / lật mặt / đổi phe / mất kiểm soát cực độ\n"
+        "  ⛔ Chỉ đổi xưng hô khi: phản bội / tra khảo / lật mặt / đổi phe / mất kiểm soát cực độ\n\n"
+        "QUY TẮC EPS — Điều chỉnh văn phong theo mức độ thân mật:\n"
+        "  EPS 1 (FORMAL)   → kính ngữ, câu đầy đủ, trang trọng\n"
+        "  EPS 2 (NEUTRAL)  → theo dynamic đã chốt, không đặc biệt\n"
+        "  EPS 3 (FRIENDLY) → thoải mái, câu ngắn hơn, có thể bỏ kính ngữ\n"
+        "  EPS 4 (CLOSE)    → rất thân, nickname ok, chia sẻ cảm xúc trực tiếp\n"
+        "  EPS 5 (INTIMATE) → ngôn ngữ riêng tư, thân mật tuyệt đối\n"
     )
     return header + "\n" + "\n\n---\n\n".join(profiles.values())
 
 
 def _json_requirements() -> str:
-    """Dùng cho flow cũ (1 call)."""
     return (
         "Trả về JSON với ĐÚNG 5 trường sau. KHÔNG bỏ sót trường nào:\n\n"
         "1. `translation`\n"
@@ -243,7 +247,6 @@ def _json_requirements() -> str:
 
 
 def _translation_output_requirements() -> str:
-    """Dùng cho Translation call (3-call flow)."""
     return (
         "Trả về BẢN DỊCH HOÀN CHỈNH — plain text, không JSON, không markdown code block.\n\n"
         "Quy tắc:\n"
@@ -252,7 +255,9 @@ def _translation_output_requirements() -> str:
         "  • Dòng trống giữa các đoạn thường — giữ nguyên như gốc\n"
         "  • Bảng hệ thống / System Box — KHÔNG có dòng trống giữa các dòng trong box\n"
         "  • KHÔNG thêm lời mở đầu, kết luận, hay chú thích vào bản dịch\n"
-        "  • KHÔNG bọc bản dịch trong dấu ngoặc kép hay code block"
+        "  • KHÔNG bọc bản dịch trong dấu ngoặc kép hay code block\n"
+        "  • Áp dụng EPS (Phần 3) để điều chỉnh văn phong xưng hô cho đúng mức độ thân mật\n"
+        "  • Áp dụng Scene Plan (Phần 4) để hiểu mạch truyện trước khi dịch"
     )
 
 
@@ -260,7 +265,6 @@ def _apply_budget_if_needed(
     budget_limit, instructions, char_instructions, name_lock_table,
     context_notes, arc_memory_text, char_profiles, glossary_ctx, chapter_text,
 ):
-    """Áp dụng token budget nếu cần. Trả về (glossary_ctx, char_profiles, arc_memory_text) đã cắt."""
     if budget_limit <= 0:
         return glossary_ctx, char_profiles, arc_memory_text
 

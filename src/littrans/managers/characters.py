@@ -8,10 +8,15 @@ Tầng:
 
 [v4] Emotion Tracker:
   emotional_state: {current, intensity, reason, last_chapter_index}
-  Scout cập nhật → prompt hiển thị ⚠️ warning khi state != normal
 
 [v4.2] Validate name + role trước khi lưu vào DB.
 [v4.2] _matches dùng lookaround thay vì \b để hỗ trợ Unicode tốt hơn.
+
+[v5.0] EPS (Emotional Proximity Signal):
+  relationships[X].intimacy_level (int 1–5)
+  relationships[X].eps_signals    (list[str])
+  _fmt_rel() hiển thị EPS bar + hint cho AI dịch
+  _apply_rel() cập nhật intimacy_level và eps_signals
 """
 from __future__ import annotations
 
@@ -22,7 +27,10 @@ from copy import deepcopy
 
 from littrans.config.settings import settings
 from littrans.utils.io_utils import load_json, save_json
-from littrans.llm.schemas import CharacterDetail, RelationshipUpdate
+from littrans.llm.schemas import (
+    CharacterDetail, RelationshipUpdate,
+    EPS_LABELS, EPS_BAR,
+)
 
 _lock  = threading.Lock()
 _mlock = threading.Lock()
@@ -44,8 +52,10 @@ _VALID_ROLES = {
 def _empty_db() -> dict:
     return {
         "meta": {
-            "schema_version": "3.0", "story_genre": "LitRPG",
-            "main_character": "", "last_updated_chapter": "",
+            "schema_version": "3.1",  # bump cho EPS
+            "story_genre": "LitRPG",
+            "main_character": "",
+            "last_updated_chapter": "",
         },
         "characters": {},
     }
@@ -87,10 +97,6 @@ def filter_characters(chapter_text: str) -> dict[str, str]:
 
 
 def _matches(name: str, profile: dict, text: str) -> bool:
-    r"""
-    Kiểm tra tên có xuất hiện trong text không.
-    Dùng (?<!\w)...(?!\w) thay vì \b để xử lý Unicode (tiếng Việt) đúng hơn.
-    """
     candidates = (
         [name]
         + profile.get("known_aliases", [])
@@ -231,7 +237,6 @@ def _fmt(name: str, p: dict, text: str, mc_name: str, archived: bool = False) ->
 
 
 def _name_in_text(name: str, text: str) -> bool:
-    """Helper nhỏ: kiểm tra tên có trong text không."""
     if not name:
         return False
     try:
@@ -246,17 +251,75 @@ def _name_in_text(name: str, text: str) -> bool:
 
 def _fmt_rel(other: str, r: dict) -> list[str]:
     status_icon = "✅ strong" if r.get("pronoun_status") == "strong" else "🔸 weak"
+
+    # EPS display
+    intimacy = r.get("intimacy_level", 2)
+    if not isinstance(intimacy, int) or not (1 <= intimacy <= 5):
+        intimacy = 2
+    eps_label, eps_hint = EPS_LABELS.get(intimacy, ("NEUTRAL", ""))
+    eps_bar   = EPS_BAR.get(intimacy, "██░░░")
+    eps_signals = r.get("eps_signals", [])
+
     out = [
         f"\n**Quan hệ với {other}:**",
         f"- Kiểu: {r.get('type','?')} | Cảm xúc: {r.get('feeling','?')}",
         f"- Xưng hô ({status_icon}): {r.get('dynamic','?')}",
+        f"- EPS: {eps_bar} {intimacy}/5 {eps_label} — {eps_hint}",
         f"- Hiện tại: {r.get('current_status','?')}",
     ]
+
+    if eps_signals:
+        out.append(f"  📌 EPS signals: {' · '.join(eps_signals[:3])}")
+
     for t in r.get("tension_points", []):
         out.append(f"  ⚡ {t}")
     for h in r.get("history", [])[-2:]:
         out.append(f"  [{h.get('chapter','?')}] {h.get('event','')}")
     return out
+
+
+# ── EPS format for prompt_builder ────────────────────────────────
+
+def format_eps_summary(char_profiles: dict[str, str], chapter_text: str) -> str:
+    """
+    Tạo bảng EPS ngắn gọn để inject vào Trans-call prompt.
+    Chỉ hiển thị các cặp nhân vật XUẤT HIỆN trong chương.
+    """
+    active  = load_active(include_staging=True)
+    chars   = active.get("characters", {})
+
+    eps_lines = []
+    seen_pairs: set[frozenset] = set()
+
+    for name in char_profiles:
+        profile = chars.get(name, {})
+        for other, r in profile.get("relationships", {}).items():
+            pair_key = frozenset([name, other])
+            if pair_key in seen_pairs:
+                continue
+            if not _name_in_text(other, chapter_text) and not _name_in_text(name, chapter_text):
+                continue
+            seen_pairs.add(pair_key)
+
+            intimacy = r.get("intimacy_level", 2)
+            if not isinstance(intimacy, int) or not (1 <= intimacy <= 5):
+                intimacy = 2
+            eps_label, eps_hint = EPS_LABELS.get(intimacy, ("NEUTRAL", ""))
+            eps_bar   = EPS_BAR.get(intimacy, "██░░░")
+            signals   = r.get("eps_signals", [])
+            sig_str   = f" [{signals[0]}]" if signals else ""
+            eps_lines.append(
+                f"  {name} ↔ {other}: {eps_bar} {intimacy}/5 {eps_label}{sig_str}"
+                f" → {eps_hint}"
+            )
+
+    if not eps_lines:
+        return ""
+
+    return (
+        "**EPS — Mức độ thân mật (điều chỉnh văn phong xưng hô theo đây):**\n"
+        + "\n".join(eps_lines)
+    )
 
 
 # ── Archive rotation ──────────────────────────────────────────────
@@ -303,7 +366,6 @@ def update_from_response(
         for char in new_chars:
             name = char.name.strip()
 
-            # ── Validate trước khi lưu ────────────────────────
             if not name or len(name) < 2:
                 logging.warning(
                     f"[Characters] Bỏ qua nhân vật tên rỗng/quá ngắn "
@@ -313,7 +375,6 @@ def update_from_response(
             if name in chars or name in stg_chars:
                 continue
 
-            # Sanitize role
             if char.role not in _VALID_ROLES:
                 logging.warning(
                     f"[Characters] '{name}' role='{char.role}' không hợp lệ → đặt NPC"
@@ -410,10 +471,14 @@ def _apply_rel(rels: dict, target: str, upd: RelationshipUpdate, event: dict, is
             "type": "", "feeling": "", "dynamic": "",
             "pronoun_status": "weak",
             "current_status": "", "tension_points": [], "history": [],
+            "intimacy_level": 2, "eps_signals": [],
         }
     r = rels[target]
     r.setdefault("history", []).append(event)
     r.setdefault("pronoun_status", "weak")
+    r.setdefault("intimacy_level", 2)
+    r.setdefault("eps_signals", [])
+
     if is_a:
         if upd.new_type:    r["type"]           = upd.new_type
         if upd.new_feeling: r["feeling"]        = upd.new_feeling
@@ -428,6 +493,24 @@ def _apply_rel(rels: dict, target: str, upd: RelationshipUpdate, event: dict, is
         elif upd.promote_to_strong:
             r["pronoun_status"] = "strong"
 
+        # ── EPS update ────────────────────────────────────────────
+        if upd.new_intimacy_level and 1 <= upd.new_intimacy_level <= 5:
+            old = r.get("intimacy_level", 2)
+            r["intimacy_level"] = upd.new_intimacy_level
+            if old != upd.new_intimacy_level:
+                logging.info(
+                    f"[EPS] {upd.character_a} ↔ {target}: "
+                    f"{old} → {upd.new_intimacy_level} ({upd.event[:50]})"
+                )
+        if upd.new_eps_signals:
+            existing = set(r.get("eps_signals", []))
+            for sig in upd.new_eps_signals:
+                if sig and sig not in existing:
+                    r["eps_signals"].append(sig)
+                    existing.add(sig)
+            # Giữ tối đa 10 signals gần nhất
+            r["eps_signals"] = r["eps_signals"][-10:]
+
 
 def _build_profile(char: CharacterDetail, src: str, idx: int) -> dict:
     how  = {e.target: e.style for e in char.how_refers_to_others}
@@ -441,6 +524,9 @@ def _build_profile(char: CharacterDetail, src: str, idx: int) -> dict:
             "current_status": rel.current_status,
             "tension_points": rel.tension_points,
             "history"       : [{"chapter": src, "event": rel.current_status or "Gặp lần đầu"}],
+            # EPS fields
+            "intimacy_level": max(1, min(5, rel.intimacy_level)),
+            "eps_signals"   : list(rel.eps_signals)[:10],
         }
     return {
         "identity"         : {

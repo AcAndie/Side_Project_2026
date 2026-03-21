@@ -2,6 +2,12 @@
 src/littrans/llm/schemas.py — Pydantic schemas cho toàn bộ pipeline.
 
 Gemini API không chấp nhận additionalProperties → _strip() xóa đệ quy.
+
+[v5.0] EPS (Emotional Proximity Signal):
+  RelationshipDetail.intimacy_level (int 1–5)
+  RelationshipDetail.eps_signals    (list[str])
+  RelationshipUpdate.new_intimacy_level
+  RelationshipUpdate.new_eps_signals
 """
 from __future__ import annotations
 
@@ -65,6 +71,24 @@ class RelationshipDetail(BaseModel):
         default="weak",
         description="weak = chưa chốt | strong = đã xác nhận, KHÔNG thay đổi",
     )
+
+    # ── EPS fields (v5.0) ─────────────────────────────────────────
+    intimacy_level  : int   = Field(
+        default=2,
+        description=(
+            "Mức độ thân mật 1–5: "
+            "1=FORMAL(lạnh/trang trọng) | 2=NEUTRAL | 3=FRIENDLY(thân thiện) "
+            "| 4=CLOSE(rất thân, nickname) | 5=INTIMATE(yêu/gia đình gần gũi)"
+        ),
+    )
+    eps_signals     : list[str] = Field(
+        default_factory=list,
+        description=(
+            "Dấu hiệu cụ thể về mức độ thân mật: "
+            "kính ngữ có dùng không, nickname, độ dài câu, chia sẻ cảm xúc..."
+        ),
+    )
+
     current_status  : str
     tension_points  : list[str]               = Field(default_factory=list)
     history         : list[RelationshipEvent] = Field(default_factory=list)
@@ -127,6 +151,16 @@ class RelationshipUpdate(BaseModel):
         description="True khi xưng hô weak đã được xác nhận → nâng lên strong",
     )
 
+    # ── EPS update fields (v5.0) ──────────────────────────────────
+    new_intimacy_level : int       = Field(
+        default=0,
+        description="0 = không thay đổi. 1–5 = cập nhật mức độ thân mật mới.",
+    )
+    new_eps_signals    : list[str] = Field(
+        default_factory=list,
+        description="Dấu hiệu mới về mức độ thân mật để append vào eps_signals.",
+    )
+
 
 # ── Top-level response ────────────────────────────────────────────
 
@@ -139,6 +173,19 @@ class TranslationResult(BaseModel):
         default_factory=list,
         description="Kỹ năng MỚI hoặc TIẾN HÓA. Đã có → KHÔNG ghi lại.",
     )
+
+
+# ── EPS constants (dùng bởi characters.py và prompt_builder.py) ───
+
+EPS_LABELS = {
+    1: ("FORMAL",      "lạnh lùng/trang trọng — giữ kính ngữ, câu đầy đủ"),
+    2: ("NEUTRAL",     "mặc định — xưng hô theo dynamic đã chốt"),
+    3: ("FRIENDLY",    "thân thiện — xưng hô thoải mái, câu ngắn hơn"),
+    4: ("CLOSE",       "rất thân — bỏ kính ngữ, có thể dùng nickname"),
+    5: ("INTIMATE",    "yêu/gia đình — ngôn ngữ đặc biệt, thân mật tuyệt đối"),
+}
+
+EPS_BAR = {1: "█░░░░", 2: "██░░░", 3: "███░░", 4: "████░", 5: "█████"}
 
 
 # ── Gemini schema helper ──────────────────────────────────────────
