@@ -1,17 +1,19 @@
 """
-src/littrans/llm/client.py — Gemini API client + Multi-Key Pool.
+src/littrans/llm/client.py — Gemini API client + Multi-Key Pool + Anthropic dispatcher.
 
-ApiKeyPool quản lý nhiều API key (primary + fallbacks).
-  - Mỗi key có error counter riêng
-  - Khi rate-limit liên tiếp > KEY_ROTATE_THRESHOLD → rotate sang key tiếp theo
-  - Nếu tất cả key dead → AllKeysExhaustedError
-  - Singleton key_pool dùng xuyên suốt pipeline
-
+ApiKeyPool quản lý nhiều Gemini API key.
 Call functions:
   call_gemini()             → structured JSON (TranslationResult) — flow cũ
-  call_gemini_translation() → plain text bản dịch — dùng trong 3-call flow
+  call_translation()        → ★ MỚI: dispatcher tự chọn Gemini/Anthropic theo settings
+  call_gemini_translation() → plain text — Gemini (vẫn giữ để backward compat)
+  call_anthropic_translation() → plain text — Claude (mới v4.5)
   call_gemini_text()        → plain text tự do (Scout, Arc Memory)
   call_gemini_json()        → free JSON (Emotion, Glossary, Pre-call, Post-call)
+
+[v4.5] Dual-Model support:
+  - Anthropic SDK lazy-imported (không crash nếu chưa cài khi dùng gemini-only)
+  - call_translation() là entry point duy nhất mà pipeline nên gọi
+  - Retry logic và rate-limit handling nhất quán cho cả 2 provider
 """
 from __future__ import annotations
 
@@ -36,19 +38,11 @@ class AllKeysExhaustedError(Exception):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# API KEY POOL
+# API KEY POOL (Gemini)
 # ═══════════════════════════════════════════════════════════════════
 
 class ApiKeyPool:
-    """
-    Thread-safe pool quản lý nhiều Gemini API key.
-
-    Rotate logic:
-      - on_rate_limit() → tăng consecutive_errors
-      - errors > threshold → mark dead, tìm key tiếp theo
-      - on_success() → reset errors của key hiện tại
-      - Tất cả dead → AllKeysExhaustedError
-    """
+    """Thread-safe pool quản lý nhiều Gemini API key."""
 
     def __init__(self, api_keys: list[str], rotate_threshold: int = 3) -> None:
         if not api_keys:
@@ -103,8 +97,66 @@ class ApiKeyPool:
         }
 
 
-# Singleton
+# Singleton Gemini pool
 key_pool = ApiKeyPool(settings.gemini_api_keys, rotate_threshold=settings.key_rotate_threshold)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ANTHROPIC CLIENT (lazy init)
+# ═══════════════════════════════════════════════════════════════════
+
+_anthropic_client = None
+_anthropic_lock   = threading.Lock()
+
+
+def _get_anthropic_client():
+    """
+    Lazy-init Anthropic client.
+    Không import lúc module load để tránh crash khi chưa cài anthropic SDK.
+    """
+    global _anthropic_client
+    if _anthropic_client is not None:
+        return _anthropic_client
+    with _anthropic_lock:
+        if _anthropic_client is not None:
+            return _anthropic_client
+        try:
+            import anthropic
+        except ImportError:
+            raise ImportError(
+                "❌ Cần cài anthropic SDK: pip install anthropic\n"
+                "   Hoặc: pip install 'littrans[anthropic]'"
+            )
+        _anthropic_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        return _anthropic_client
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PUBLIC — DISPATCHER (entry point cho pipeline)
+# ═══════════════════════════════════════════════════════════════════
+
+def call_translation(system_prompt: str, chapter_text: str) -> str:
+    """
+    ★ Entry point chính cho Trans-call (3-call flow).
+
+    Tự động dispatch sang Gemini hoặc Anthropic dựa trên
+    settings.translation_provider và settings.translation_model.
+
+    Pipeline LUÔN dùng hàm này thay vì gọi thẳng call_gemini_translation()
+    hay call_anthropic_translation().
+    """
+    if settings.using_anthropic:
+        return call_anthropic_translation(system_prompt, chapter_text)
+    else:
+        return call_gemini_translation(system_prompt, chapter_text)
+
+
+def translation_model_info() -> str:
+    """
+    Trả về chuỗi mô tả model đang dùng để in ra log.
+    VD: "claude-sonnet-4-6 (anthropic)" hoặc "gemini-2.0-flash-exp (gemini)"
+    """
+    return f"{settings.translation_model} ({settings.translation_provider})"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -142,17 +194,17 @@ def call_gemini(system_prompt: str, chapter_text: str) -> TranslationResult:
 
 def call_gemini_translation(system_prompt: str, chapter_text: str) -> str:
     """
-    3-call flow — Translation call: chỉ dịch, output plain text.
-
-    Khác call_gemini():
-      - Không dùng response_schema / response_mime_type
-      - Output là plain text bản dịch, không phải JSON
-      - Caller (pipeline) tự validate chất lượng
-
-    Raise exception khi thất bại (caller quyết định retry).
+    Gemini Trans-call — plain text output.
+    Dùng settings.translation_model nếu provider là gemini,
+    fallback về settings.gemini_model nếu không.
     """
+    model = (
+        settings.translation_model
+        if settings.translation_provider == "gemini"
+        else settings.gemini_model
+    )
     response = key_pool.current_client.models.generate_content(
-        model=settings.gemini_model,
+        model=model,
         contents=chapter_text,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
@@ -176,11 +228,54 @@ def call_gemini_translation(system_prompt: str, chapter_text: str) -> str:
     return text
 
 
+def call_anthropic_translation(system_prompt: str, chapter_text: str) -> str:
+    """
+    Anthropic (Claude) Trans-call — plain text output.
+
+    Đặc điểm so với Gemini:
+      - system_prompt đi vào `system` param (không phải system_instruction)
+      - chapter_text đi vào messages[user]
+      - Temperature mặc định 1.0 cho Claude (khuyến nghị của Anthropic)
+      - Không dùng structured output — plain text như Gemini translation call
+
+    Raise exception khi thất bại — caller quyết định retry.
+    """
+    client = _get_anthropic_client()
+    model  = settings.translation_model
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=8096,
+        temperature=1,          # Anthropic khuyến nghị temp=1 cho Claude 3+
+        system=system_prompt,
+        messages=[
+            {"role": "user", "content": chapter_text}
+        ],
+    )
+
+    # Log token usage
+    if hasattr(response, "usage") and response.usage:
+        u = response.usage
+        _log_tokens(
+            getattr(u, "input_tokens", "?"),
+            getattr(u, "output_tokens", "?"),
+            "—",                # Anthropic không trả total riêng
+        )
+
+    # Extract text từ content blocks
+    text = ""
+    for block in response.content:
+        if hasattr(block, "text"):
+            text += block.text
+
+    if not text.strip():
+        raise ValueError("Anthropic translation call trả về text rỗng.")
+
+    return text
+
+
 def call_gemini_text(system_prompt: str, user_text: str) -> str:
-    """
-    Gọi Gemini đơn giản (Scout, Arc Memory) → plain text.
-    Không dùng structured output.
-    """
+    """Scout, Arc Memory — plain text, luôn dùng Gemini."""
     response = key_pool.current_client.models.generate_content(
         model=settings.gemini_model,
         contents=user_text,
@@ -195,8 +290,8 @@ def call_gemini_text(system_prompt: str, user_text: str) -> str:
 
 def call_gemini_json(system_prompt: str, user_text: str) -> dict:
     """
-    Gọi Gemini với yêu cầu trả về JSON tự do.
-    Dùng cho: Emotion Tracker, clean_glossary, Pre-call, Post-call.
+    Emotion Tracker, clean_glossary, Pre-call, Post-call — JSON tự do.
+    Luôn dùng Gemini (không dispatch sang Anthropic).
     """
     response = key_pool.current_client.models.generate_content(
         model=settings.gemini_model,
@@ -219,13 +314,16 @@ def call_gemini_json(system_prompt: str, user_text: str) -> dict:
 
 def is_rate_limit(exc: Exception) -> bool:
     msg = str(exc).lower()
-    return any(k in msg for k in ("429", "rate limit", "quota", "resource_exhausted"))
+    return any(k in msg for k in ("429", "rate limit", "quota", "resource_exhausted",
+                                   "overloaded", "529"))  # 529 = Anthropic overload
 
 
 def handle_api_error(exc: Exception) -> None:
-    """Gọi từ pipeline khi gặp exception — thông báo pool để cân nhắc rotate."""
+    """Gọi từ pipeline khi gặp exception."""
     if is_rate_limit(exc):
-        key_pool.on_rate_limit()
+        # Chỉ rotate Gemini key pool — Anthropic dùng key đơn, không có pool
+        if not settings.using_anthropic:
+            key_pool.on_rate_limit()
 
 
 # ═══════════════════════════════════════════════════════════════════

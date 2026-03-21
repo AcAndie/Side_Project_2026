@@ -36,7 +36,11 @@ from littrans.managers.memory     import load_recent as load_arc_memory
 from littrans.engine.scout        import run as scout_run, should_refresh, load_context_notes
 from littrans.engine.prompt_builder import build as build_prompt, build_translation_prompt
 from littrans.engine.quality_guard  import check as quality_check, build_retry_prompt
-from littrans.llm.client            import call_gemini, call_gemini_translation, is_rate_limit, handle_api_error, key_pool
+from littrans.llm.client import (
+        call_gemini, call_translation, call_gemini_translation,
+        translation_model_info, is_rate_limit, handle_api_error, key_pool,
+    )
+
 
 
 class Pipeline:
@@ -221,12 +225,12 @@ class Pipeline:
         for attempt in range(1, max_trans + 1):
             trans_attempts = attempt
             try:
-                print(f"  ⚙️  Trans-call {attempt}/{max_trans} | {settings.gemini_model}")
+                print(f"  ⚙️  Trans-call {attempt}/{max_trans} | {translation_model_info()}")
                 input_text = (
                     f"⚠️ RETRY — {retry_instruction}\n\n---\n\n{text}"
                     if retry_instruction else text
                 )
-                translation = call_gemini_translation(system_prompt, input_text)
+                translation = call_translation(system_prompt, input_text)
 
                 # Mechanical quality check (nhanh, không tốn API call)
                 ok_mech, mech_msg = quality_check(translation, text)
@@ -296,7 +300,7 @@ class Pipeline:
                 # Retry Trans-call
                 try:
                     input_text = f"⚠️ RETRY — {retry_instruction}\n\n---\n\n{text}"
-                    final_translation = call_gemini_translation(system_prompt, input_text)
+                    final_translation = call_translation(system_prompt, input_text)
                     time.sleep(settings.post_call_sleep)
                 except Exception as e:
                     logging.error(f"{filename} | post retry trans | {e}")
@@ -681,7 +685,10 @@ class Pipeline:
         )
         mode_str = "3-call (pre+trans+post)" if settings.use_three_call else "1-call (legacy)"
         print(f"\n{'═'*62}")
-        print(f"  Pipeline Dịch Truyện v4.2 — {settings.gemini_model}")
+        trans_info = translation_model_info()
+        gemini_info = settings.gemini_model
+        print(f"  Pipeline Dịch Truyện v4.5 — Trans: {trans_info}")
+        print(f"  Scout/Pre/Post             — Gemini: {gemini_info}")
         print(f"{'─'*62}")
         print(f"  Mode             : {mode_str}")
         print(f"  Tổng chương      : {len(all_files)}")

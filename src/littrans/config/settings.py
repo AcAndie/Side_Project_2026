@@ -3,10 +3,11 @@ src/littrans/config/settings.py — Toàn bộ cấu hình pipeline.
 
 Chỉnh qua .env, KHÔNG sửa file này.
 
-[v4.3 FIX] _env_bool() xử lý đầy đủ các giá trị truthy phổ biến:
-  true / True / TRUE / 1 / yes / on → True
-  false / False / FALSE / 0 / no / off / (rỗng) → False
+[v4.3 FIX] _env_bool() xử lý đầy đủ các giá trị truthy phổ biến.
 [v4.4] Thêm 3 config cho Scout Glossary Suggest.
+[v4.5] Dual-Model: TRANSLATION_PROVIDER + TRANSLATION_MODEL + ANTHROPIC_API_KEY.
+       Cho phép chọn model dịch thuật ngay lúc bắt đầu mà không ảnh hưởng
+       đến các call khác (Scout, Pre, Post vẫn dùng Gemini).
 """
 from __future__ import annotations
 
@@ -27,12 +28,6 @@ def _env_int(key: str, default: int) -> int:
     return int(os.environ.get(key, str(default)))
 
 def _env_bool(key: str, default: bool) -> bool:
-    """
-    Parse boolean từ environment variable.
-    Chấp nhận: true/True/TRUE/1/yes/on → True
-               false/False/FALSE/0/no/off/(rỗng) → False
-    [FIX] Phiên bản cũ chỉ nhận "true", bỏ sót 1/yes/on.
-    """
     val = os.environ.get(key, "").strip().lower()
     if not val:
         return default
@@ -45,14 +40,54 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
+# ── Danh sách model hợp lệ ───────────────────────────────────────
+ANTHROPIC_MODELS = {
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
+}
+
+GEMINI_MODELS = {
+    "gemini-2.0-flash-exp",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+}
+
+
+def _default_translation_model() -> str:
+    """
+    Trả về model mặc định dựa trên provider đã chọn.
+    Gọi một lần lúc khởi tạo Settings.
+    """
+    provider = _env("TRANSLATION_PROVIDER", "gemini").strip().lower()
+    # Nếu user đã chỉ định rõ TRANSLATION_MODEL → dùng luôn
+    explicit = _env("TRANSLATION_MODEL", "").strip()
+    if explicit:
+        return explicit
+    # Mặc định theo provider
+    if provider == "anthropic":
+        return "claude-sonnet-4-6"
+    return _env("GEMINI_MODEL", "gemini-2.0-flash-exp")
+
+
 @dataclass
 class Settings:
-    # ── LLM ─────────────────────────────────────────────────────
+    # ── LLM — Gemini (Scout, Pre-call, Post-call, Arc Memory) ─────
     gemini_api_key        : str  = field(default_factory=lambda: _env("GEMINI_API_KEY"))
     fallback_key_1        : str  = field(default_factory=lambda: _env("FALLBACK_KEY_1"))
     fallback_key_2        : str  = field(default_factory=lambda: _env("FALLBACK_KEY_2"))
     key_rotate_threshold  : int  = field(default_factory=lambda: _env_int("KEY_ROTATE_THRESHOLD", 3))
     gemini_model          : str  = field(default_factory=lambda: _env("GEMINI_MODEL", "gemini-2.0-flash-exp"))
+
+    # ── LLM — Translation Model (Dual-Model v4.5) ─────────────────
+    # TRANSLATION_PROVIDER: "gemini" | "anthropic"
+    # TRANSLATION_MODEL:    tên model cụ thể, hoặc để trống → tự chọn theo provider
+    # ANTHROPIC_API_KEY:    chỉ cần khi TRANSLATION_PROVIDER=anthropic
+    anthropic_api_key     : str  = field(default_factory=lambda: _env("ANTHROPIC_API_KEY"))
+    translation_provider  : str  = field(default_factory=lambda: _env("TRANSLATION_PROVIDER", "gemini").strip().lower())
+    translation_model     : str  = field(default_factory=_default_translation_model)
 
     # ── Pipeline ─────────────────────────────────────────────────
     max_retries           : int  = field(default_factory=lambda: _env_int("MAX_RETRIES", 5))
@@ -99,8 +134,23 @@ class Settings:
     prompts_dir  : Path = field(default_factory=lambda: Path(_env("PROMPTS_DIR", "prompts")))
 
     def __post_init__(self) -> None:
+        # Validate Gemini key (luôn cần cho Scout/Pre/Post)
         if not self.gemini_api_key:
             sys.exit("❌ Thiếu GEMINI_API_KEY trong .env")
+
+        # Validate Anthropic key khi dùng anthropic provider
+        if self.translation_provider == "anthropic" and not self.anthropic_api_key:
+            sys.exit(
+                "❌ TRANSLATION_PROVIDER=anthropic nhưng thiếu ANTHROPIC_API_KEY trong .env\n"
+                "   Thêm: ANTHROPIC_API_KEY=sk-ant-..."
+            )
+
+        # Validate provider value
+        if self.translation_provider not in ("gemini", "anthropic"):
+            sys.exit(
+                f"❌ TRANSLATION_PROVIDER='{self.translation_provider}' không hợp lệ.\n"
+                "   Chỉ chấp nhận: gemini | anthropic"
+            )
 
         for p in [self.input_dir, self.output_dir, self.data_dir, self.log_dir,
                   self.glossary_dir, self.char_dir, self.memory_dir,
@@ -177,6 +227,11 @@ class Settings:
     @property
     def gemini_api_keys(self) -> list[str]:
         return [k for k in [self.gemini_api_key, self.fallback_key_1, self.fallback_key_2] if k]
+
+    @property
+    def using_anthropic(self) -> bool:
+        """True nếu Trans-call dùng Anthropic Claude."""
+        return self.translation_provider == "anthropic"
 
 
 # Singleton — import từ bất kỳ đâu
