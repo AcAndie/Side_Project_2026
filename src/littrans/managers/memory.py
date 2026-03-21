@@ -15,8 +15,6 @@ import re
 import logging
 from datetime import datetime
 
-from google.genai import types
-
 from littrans.config.settings import settings
 from littrans.utils.io_utils import load_text, atomic_write
 

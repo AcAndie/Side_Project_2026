@@ -4,16 +4,16 @@ src/littrans/engine/scout.py — Scout AI.
 Mỗi SCOUT_REFRESH_EVERY chương:
   1. Xóa Context_Notes cũ → sinh mới (4 mục)
   2. Append Arc_Memory (tóm tắt window)
-  3. [v4]   Cập nhật emotional_state nhân vật
+  3. [v4] Cập nhật emotional_state nhân vật
   4. [v4.4] Đề xuất thuật ngữ mới → Staging_Terms.md
-  5. [v5.0] Cập nhật EPS (Emotional Proximity Signal) giữa các cặp nhân vật
 
 Không raise — pipeline tiếp tục nếu Scout thất bại.
 
 [v4.2] Validate emotional_states là list + giá trị hợp lệ trước khi ghi DB.
 [v4.3 FIX] Xoá dead import `from google.genai import types`.
 [v4.4] Thêm _suggest_new_terms() — Scout Glossary Suggest.
-[v5.0] Thêm _update_eps() — EPS update cho các cặp quan hệ thay đổi trong window.
+       Chạy call riêng (call_gemini_json) sau context notes để không nhiễu 4 mục chính.
+       Có thể tắt qua SCOUT_SUGGEST_GLOSSARY=false.
 """
 from __future__ import annotations
 
@@ -70,41 +70,6 @@ Quy tắc:
 - "changed" : vừa trải qua sự kiện lớn thay đổi nhận thức/mục tiêu
 - Chỉ nhân vật có tên rõ ràng và xuất hiện đáng kể. Tối đa 8 nhân vật."""
 
-_EPS_SYSTEM = """Bạn là AI phân tích mức độ thân mật (Emotional Proximity Signal) giữa các nhân vật.
-
-Đọc các chương, xác định các cặp nhân vật có thay đổi mức độ thân mật đáng kể.
-
-Thang EPS (1–5):
-  1 = FORMAL       : lạnh lùng, trang trọng — dùng kính ngữ, câu đầy đủ
-  2 = NEUTRAL      : mặc định, không đặc biệt
-  3 = FRIENDLY     : thân thiện, thoải mái — bỏ kính ngữ, câu ngắn hơn
-  4 = CLOSE        : rất thân — nickname, chia sẻ cảm xúc cá nhân
-  5 = INTIMATE     : yêu / gia đình gần gũi — ngôn ngữ riêng tư đặc biệt
-
-Chỉ báo cáo cặp nhân vật:
-  - Có tương tác trực tiếp trong window này VÀ
-  - Mức độ thân mật thay đổi RÕ RÀNG (không phải suy đoán)
-
-Trả về JSON. KHÔNG thêm bất cứ thứ gì ngoài JSON:
-{
-  "eps_updates": [
-    {
-      "character_a": "tên nhân vật A",
-      "character_b": "tên nhân vật B",
-      "new_intimacy_level": 3,
-      "signals": [
-        "A gọi B bằng nickname lần đầu ở chương X",
-        "B chia sẻ bí mật cá nhân với A",
-        "Họ bắt đầu dùng xưng hô thân mật hơn"
-      ],
-      "reason": "Sau sự kiện cùng thoát hiểm, A và B trở nên thân thiết hơn",
-      "chapter_reference": "chapter_005.txt"
-    }
-  ]
-}
-
-Nếu không có thay đổi đáng kể → trả về: {"eps_updates": []}"""
-
 _GLOSSARY_SUGGEST_SYSTEM = """Bạn là chuyên gia thuật ngữ cho truyện LitRPG / Tu Tiên.
 
 Đọc đoạn truyện tiếng Anh và tìm thuật ngữ CHUYÊN BIỆT chưa có trong danh sách đã biết.
@@ -148,7 +113,7 @@ _VALID_INTENSITIES = {"low", "medium", "high"}
 # ── Public API ────────────────────────────────────────────────────
 
 def run(all_files: list[str], current_index: int) -> None:
-    """Chạy toàn bộ Scout: notes + arc memory + emotion + eps + glossary suggest. Không raise."""
+    """Chạy toàn bộ Scout: notes + arc memory + emotion + glossary suggest. Không raise."""
     _refresh_context_notes(all_files, current_index)
 
     start  = max(0, current_index - settings.scout_lookback)
@@ -167,12 +132,6 @@ def run(all_files: list[str], current_index: int) -> None:
     except Exception as e:
         logging.error(f"Emotion Tracker: {e}")
         print(f"  ⚠️  Emotion Tracker lỗi: {e}")
-
-    try:
-        _update_eps(all_files, current_index)
-    except Exception as e:
-        logging.error(f"EPS Update: {e}")
-        print(f"  ⚠️  EPS Update lỗi: {e}")
 
     try:
         _suggest_new_terms(all_files, current_index)
@@ -273,10 +232,19 @@ def _update_emotional_states(all_files: list[str], current_index: int) -> None:
         return
 
     if not isinstance(data, dict):
+        logging.warning(f"[Emotion] Response không phải dict: {type(data)}")
         return
 
     states = data.get("emotional_states", [])
-    if not isinstance(states, list) or not states:
+
+    if not isinstance(states, list):
+        logging.warning(
+            f"[Emotion] 'emotional_states' không phải list "
+            f"(got {type(states).__name__}: {str(states)[:80]}) — bỏ qua."
+        )
+        return
+
+    if not states:
         return
 
     char_data = load_json(settings.characters_active_file) or {}
@@ -295,15 +263,18 @@ def _update_emotional_states(all_files: list[str], current_index: int) -> None:
     for entry in states:
         if not isinstance(entry, dict):
             continue
+
         char_name = entry.get("character", "")
         if not isinstance(char_name, str) or not char_name.strip():
             continue
         char_name = char_name.strip()
+
         state     = entry.get("state", "normal")
         intensity = entry.get("intensity", "medium")
         reason    = entry.get("reason", "")
 
         if state not in _VALID_STATES:
+            logging.warning(f"[Emotion] '{char_name}' state='{state}' không hợp lệ → 'normal'")
             state = "normal"
         if intensity not in _VALID_INTENSITIES:
             intensity = "medium"
@@ -331,169 +302,19 @@ def _update_emotional_states(all_files: list[str], current_index: int) -> None:
               + (f" | Active: {', '.join(non_normal[:5])}" if non_normal else " | Tất cả normal"))
 
 
-# ── EPS Update (v5.0) ─────────────────────────────────────────────
-
-def _update_eps(all_files: list[str], current_index: int) -> None:
-    """
-    Phân tích thay đổi mức độ thân mật giữa các cặp nhân vật trong window.
-    Cập nhật intimacy_level và eps_signals vào Characters_Active.json.
-    """
-    start  = max(0, current_index - settings.scout_lookback)
-    window = all_files[start:current_index]
-    if not window:
-        return
-
-    # Đọc text chương — ưu tiên bản dịch VN (ngắn hơn EN raw)
-    texts = []
-    for fn in window[-5:]:  # Chỉ 5 chương gần nhất để tiết kiệm token
-        base, _ = os.path.splitext(fn)
-        vn_path = str(settings.output_dir / f"{base}_VN.txt")
-        en_path = str(settings.input_dir  / fn)
-        for path in [vn_path, en_path]:
-            text = load_text(path)
-            if text.strip():
-                texts.append((fn, text[:3000]))
-                break
-
-    if not texts:
-        return
-
-    # Load danh sách nhân vật để gửi kèm context
-    char_data = load_json(settings.characters_active_file) or {}
-    chars     = char_data.get("characters", {})
-    if not chars:
-        return
-
-    # Tóm tắt quan hệ hiện tại để AI có context
-    rel_summary_lines = []
-    for name, profile in list(chars.items())[:10]:  # Giới hạn 10 nhân vật
-        for other, r in profile.get("relationships", {}).items():
-            intimacy = r.get("intimacy_level", 2)
-            rel_summary_lines.append(
-                f"  {name} ↔ {other}: EPS={intimacy} | dynamic={r.get('dynamic','?')}"
-            )
-
-    rel_context = ""
-    if rel_summary_lines:
-        rel_context = "## QUAN HỆ HIỆN TẠI\n" + "\n".join(rel_summary_lines[:20])
-
-    user_msg = (
-        rel_context + "\n\n---\n\n"
-        + "\n\n---\n\n".join(f"### {fn}\n\n{t}" for fn, t in texts)
-    )
-
-    try:
-        from littrans.llm.client import call_gemini_json
-        data = call_gemini_json(_EPS_SYSTEM, user_msg)
-    except Exception as e:
-        logging.error(f"[EPS] call lỗi: {e}")
-        return
-
-    if not isinstance(data, dict):
-        return
-
-    eps_updates = data.get("eps_updates", [])
-    if not isinstance(eps_updates, list) or not eps_updates:
-        return
-
-    updated_pairs = 0
-    dirty = False
-
-    for upd in eps_updates:
-        if not isinstance(upd, dict):
-            continue
-
-        char_a = upd.get("character_a", "").strip()
-        char_b = upd.get("character_b", "").strip()
-        new_level = upd.get("new_intimacy_level")
-        signals   = upd.get("signals", [])
-        reason    = upd.get("reason", "")
-
-        if not char_a or not char_b:
-            continue
-        if not isinstance(new_level, int) or not (1 <= new_level <= 5):
-            continue
-
-        # Tìm match case-insensitive
-        matched_a = next((n for n in chars if n.lower() == char_a.lower()), None)
-        matched_b = next((n for n in chars if n.lower() == char_b.lower()), None)
-
-        if not matched_a:
-            continue  # Bỏ qua nếu char_a không có trong DB
-
-        # Cập nhật relationship của matched_a → matched_b
-        rels_a = chars[matched_a].setdefault("relationships", {})
-        target_key = matched_b if matched_b else char_b
-
-        if target_key not in rels_a:
-            rels_a[target_key] = {
-                "type": "neutral", "feeling": "", "dynamic": "",
-                "pronoun_status": "weak", "current_status": "",
-                "tension_points": [], "history": [],
-                "intimacy_level": 2, "eps_signals": [],
-            }
-
-        r = rels_a[target_key]
-        old_level = r.get("intimacy_level", 2)
-
-        if old_level == new_level and not signals:
-            continue  # Không có gì thay đổi
-
-        r["intimacy_level"] = new_level
-
-        # Append signals mới (không trùng)
-        existing_sigs = set(r.get("eps_signals", []))
-        new_sigs = [s for s in signals if isinstance(s, str) and s and s not in existing_sigs]
-        if new_sigs:
-            r.setdefault("eps_signals", []).extend(new_sigs)
-            r["eps_signals"] = r["eps_signals"][-10:]  # Giữ 10 gần nhất
-
-        if reason:
-            r.setdefault("history", []).append({
-                "chapter": upd.get("chapter_reference", window[-1] if window else ""),
-                "event"  : f"[EPS {old_level}→{new_level}] {reason}",
-            })
-
-        updated_pairs += 1
-        dirty = True
-
-        # Cũng cập nhật chiều ngược lại nếu matched_b có trong DB
-        if matched_b and matched_b in chars:
-            rels_b = chars[matched_b].setdefault("relationships", {})
-            if matched_a not in rels_b:
-                rels_b[matched_a] = {
-                    "type": "neutral", "feeling": "", "dynamic": "",
-                    "pronoun_status": "weak", "current_status": "",
-                    "tension_points": [], "history": [],
-                    "intimacy_level": 2, "eps_signals": [],
-                }
-            r_b = rels_b[matched_a]
-            r_b["intimacy_level"] = new_level
-            if new_sigs:
-                r_b.setdefault("eps_signals", []).extend(new_sigs)
-                r_b["eps_signals"] = r_b["eps_signals"][-10:]
-
-    if dirty:
-        save_json(settings.characters_active_file, char_data)
-        # Log summary
-        from littrans.llm.schemas import EPS_LABELS
-        pair_summaries = []
-        for upd in eps_updates[:3]:
-            if isinstance(upd, dict):
-                lvl = upd.get("new_intimacy_level", 0)
-                label = EPS_LABELS.get(lvl, ("?", ""))[0] if lvl else "?"
-                pair_summaries.append(
-                    f"{upd.get('character_a','?')}↔{upd.get('character_b','?')}:{lvl}/{label}"
-                )
-        suffix = " | ".join(pair_summaries)
-        print(f"  💞 EPS Update: {updated_pairs} cặp → {suffix}")
-
-
 # ── Glossary Suggest ──────────────────────────────────────────────
 
 def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
     """
     Đề xuất thuật ngữ mới từ window hiện tại → ghi vào Staging_Terms.md.
+
+    Luồng:
+      1. Đọc 5 chương EN gần nhất trong window (tiết kiệm token)
+      2. Load existing_terms_set() để dedup
+      3. call_gemini_json() với _GLOSSARY_SUGGEST_SYSTEM
+      4. Filter theo confidence >= SCOUT_SUGGEST_MIN_CONFIDENCE
+      5. Gọi add_new_terms() → staging (nếu IMMEDIATE_MERGE=false) hoặc trực tiếp vào category file
+
     Chỉ chạy khi SCOUT_SUGGEST_GLOSSARY=true. Không raise.
     """
     if not settings.scout_suggest_glossary:
@@ -504,6 +325,8 @@ def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
     if not window:
         return
 
+    # Chỉ đọc EN (chưa có bản dịch VN cho window này)
+    # Giới hạn 5 chương gần nhất để tiết kiệm token
     texts = []
     for fn in window[-5:]:
         text = load_text(str(settings.input_dir / fn))
@@ -513,9 +336,11 @@ def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
     if not texts:
         return
 
+    # Load existing terms để dedup
     from littrans.managers.glossary import existing_terms_set
     known = existing_terms_set()
 
+    # Giới hạn danh sách "đã biết" để không bloat prompt (200 terms đủ để dedup tốt)
     known_sample = sorted(known)[:200]
     known_block  = "\n".join(f"- {t}" for t in known_sample)
     if len(known) > 200:
@@ -523,7 +348,8 @@ def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
 
     user_msg = (
         f"## THUẬT NGỮ ĐÃ BIẾT — KHÔNG BÁO CÁO LẠI\n"
-        f"{known_block}\n\n---\n\n"
+        f"{known_block}\n\n"
+        f"---\n\n"
         + "\n\n---\n\n".join(f"### {fn}\n\n{text}" for fn, text in texts)
     )
 
@@ -535,19 +361,23 @@ def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
         return
 
     if not isinstance(data, dict):
+        logging.warning(f"[GlossarySuggest] Response không phải dict: {type(data)}")
         return
 
     suggestions = data.get("suggested_terms", [])
     if not isinstance(suggestions, list) or not suggestions:
         return
 
+    # Filter theo confidence + dedup với known set
     from littrans.llm.schemas import TermDetail
+
     filtered: list[TermDetail] = []
     seen_this_batch: set[str]  = set()
 
     for s in suggestions:
         if not isinstance(s, dict):
             continue
+
         eng  = s.get("english", "").strip()
         vn   = s.get("vietnamese", "").strip()
         cat  = s.get("category", "general")
@@ -557,6 +387,7 @@ def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
         except (ValueError, TypeError):
             pass
 
+        # Validate
         if not eng or not vn:
             continue
         if conf < settings.scout_suggest_min_confidence:
@@ -566,11 +397,16 @@ def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
         if len(filtered) >= settings.scout_suggest_max_terms:
             break
 
+        # Normalize category
         if cat not in ("pathways", "organizations", "items", "locations", "general"):
             cat = "general"
 
         try:
-            filtered.append(TermDetail(english=eng, vietnamese=vn, category=cat))
+            filtered.append(TermDetail(
+                english    = eng,
+                vietnamese = vn,
+                category   = cat,
+            ))
             seen_this_batch.add(eng.lower())
         except Exception as e:
             logging.warning(f"[GlossarySuggest] TermDetail parse lỗi [{eng}]: {e}")
@@ -579,10 +415,12 @@ def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
         return
 
     from littrans.managers.glossary import add_new_terms
+
     source_label = f"scout_suggest_{window[-1]}"
     n = add_new_terms(filtered, source_label)
 
     if n:
+        # Log tóm tắt theo category
         cats: dict[str, int] = {}
         for t in filtered[:n]:
             cats[t.category] = cats.get(t.category, 0) + 1

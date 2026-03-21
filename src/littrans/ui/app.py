@@ -6,6 +6,9 @@ Khởi động:
     python run_ui.py
 
 [v4.4] Thêm staging badge trong sidebar và info banner trong Glossary tab.
+[v4.5.1] Fix: tách `clean_running`/`clean_logs` riêng khỏi `running`/`logs` của translate pipeline.
+         Fix: remove dead `import threading`.
+         Fix: clear stats/chapters cache sau khi pipeline/retranslate hoàn tất.
 """
 from __future__ import annotations
 
@@ -13,7 +16,6 @@ import html
 import queue
 import re
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -36,17 +38,24 @@ st.set_page_config(
 
 # ── Session state ─────────────────────────────────────────────────
 _DEFAULTS: dict[str, Any] = {
-    "page"         : "translate",
-    "running"      : False,
-    "run_thread"   : None,
-    "log_q"        : None,
-    "logs"         : [],
-    "rt_running"   : False,
-    "rt_thread"    : None,
-    "rt_q"         : None,
-    "rt_logs"      : [],
-    "sel_ch"       : 0,
-    "show_rt"      : False,
+    # Main translate pipeline
+    "page"          : "translate",
+    "running"       : False,
+    "run_thread"    : None,
+    "log_q"         : None,
+    "logs"          : [],
+    # Retranslate
+    "rt_running"    : False,
+    "rt_thread"     : None,
+    "rt_q"          : None,
+    "rt_logs"       : [],
+    "sel_ch"        : 0,
+    "show_rt"       : False,
+    # Clean operations (glossary / characters) — tách riêng để không pollute translate tab
+    "clean_running" : False,
+    "clean_q"       : None,
+    "clean_logs"    : [],
+    # Misc
     "settings_saved": False,
 }
 for _k, _v in _DEFAULTS.items():
@@ -397,6 +406,7 @@ def render_translate() -> None:
                 S.logs.append("─" * 56)
                 S.logs.append("✅ Pipeline hoàn tất.")
                 load_chapters.clear()
+                load_stats.clear()   # [FIX] refresh stats sau khi pipeline xong
 
         st.markdown("**Log:**")
         _show_log(S.logs)
@@ -548,11 +558,11 @@ def _render_chapter_detail(ch: dict) -> None:
                     from littrans.ui.runner import run_background
                     S.rt_thread = run_background(
                         S.rt_q,
-                        mode        = "retranslate",
-                        filename    = ch["name"],
-                        update_data = update_data,
-                        force_scout = force_scout,
-                        all_files   = all_files_list,
+                        mode          = "retranslate",
+                        filename      = ch["name"],
+                        update_data   = update_data,
+                        force_scout   = force_scout,
+                        all_files     = all_files_list,
                         chapter_index = ch_idx,
                     )
                     S.rt_running = True
@@ -568,6 +578,7 @@ def _render_chapter_detail(ch: dict) -> None:
                         S.rt_logs.append("─" * 56)
                         S.rt_logs.append("✅ Dịch lại hoàn tất.")
                         load_chapters.clear()
+                        load_stats.clear()    # [FIX] refresh stats sau retranslate
                 _show_log(S.rt_logs)
                 if S.rt_running:
                     time.sleep(0.9)
@@ -705,13 +716,17 @@ def render_glossary() -> None:
         label_visibility="collapsed", key="glos_q",
     )
     with c3:
-        if st.button("🔄 Clean glossary", help="Phân loại Staging → đúng category"):
-            S.logs  = []
-            S.log_q = queue.Queue()
-            from littrans.ui.runner import run_background
-            run_background(S.log_q, mode="clean_glossary")
-            S.running = True
-            st.rerun()
+        # [FIX] dùng clean_running thay vì running — không ảnh hưởng tab Dịch
+        if not S.clean_running:
+            if st.button("🔄 Clean glossary", help="Phân loại Staging → đúng category"):
+                S.clean_logs = []
+                S.clean_q    = queue.Queue()
+                from littrans.ui.runner import run_background
+                run_background(S.clean_q, mode="clean_glossary")
+                S.clean_running = True
+                st.rerun()
+        else:
+            st.button("⏳ Đang phân loại…", disabled=True)
     with c4:
         if st.button("↺ Refresh"):
             load_glossary_data.clear()
@@ -747,16 +762,20 @@ def render_glossary() -> None:
     else:
         st.info("Không tìm thấy thuật ngữ phù hợp.")
 
-    # ── Show log if clean is running ───────────────────────────────
-    if S.running or (S.logs and any("glossary" in l.lower() or "thuật ngữ" in l for l in S.logs)):
-        if S.running:
-            done_flag = _poll("log_q", "logs")
+    # ── [FIX] Show log dùng clean_running / clean_logs riêng biệt ─
+    if S.clean_running or S.clean_logs:
+        if S.clean_running:
+            done_flag = _poll("clean_q", "clean_logs")
             if done_flag:
-                S.running = False
+                S.clean_running = False
+                S.clean_logs.append("─" * 56)
+                S.clean_logs.append("✅ Clean glossary hoàn tất.")
                 load_glossary_data.clear()
-        if S.logs:
-            _show_log(S.logs)
-        if S.running:
+                load_stats.clear()
+        if S.clean_logs:
+            st.markdown("**Log:**")
+            _show_log(S.clean_logs)
+        if S.clean_running:
             time.sleep(0.9)
             st.rerun()
 
@@ -867,7 +886,7 @@ def render_settings() -> None:
             "Điền thông tin và nhấn **Lưu .env** để tạo."
         )
 
-    # ── 8 tabs (thêm Scout Glossary Suggest) ──────────────────────
+    # ── 8 tabs ────────────────────────────────────────────────────
     tabs = st.tabs([
         "🔑 API", "⚙️ Pipeline", "🔭 Scout AI",
         "📖 Glossary Suggest", "👤 Nhân vật",
@@ -903,6 +922,32 @@ def render_settings() -> None:
                                   help="KEY_ROTATE_THRESHOLD")
         updates["GEMINI_MODEL"]         = model
         updates["KEY_ROTATE_THRESHOLD"] = str(rotate)
+
+        st.divider()
+        st.markdown("#### Translation Model (Dual-Model v4.5)")
+        provider_opts = ["gemini", "anthropic"]
+        cur_provider  = e("TRANSLATION_PROVIDER", "gemini")
+        provider_idx  = provider_opts.index(cur_provider) if cur_provider in provider_opts else 0
+        provider_sel  = st.selectbox(
+            "Translation provider", provider_opts, index=provider_idx,
+            help="TRANSLATION_PROVIDER — gemini hoặc anthropic",
+        )
+        trans_model = st.text_input(
+            "Translation model (để trống = dùng mặc định theo provider)",
+            value=e("TRANSLATION_MODEL", ""),
+            help="TRANSLATION_MODEL",
+        )
+        anthropic_key = st.text_input(
+            "Anthropic API Key (bắt buộc nếu dùng anthropic provider)",
+            value=e("ANTHROPIC_API_KEY"),
+            type="password",
+            help="ANTHROPIC_API_KEY",
+        )
+        updates.update({
+            "TRANSLATION_PROVIDER": provider_sel,
+            "TRANSLATION_MODEL"   : trans_model,
+            "ANTHROPIC_API_KEY"   : anthropic_key,
+        })
 
     # ── TAB 1: Pipeline ────────────────────────────────────────────
     with tabs[1]:
@@ -963,7 +1008,7 @@ def render_settings() -> None:
             "ARC_MEMORY_WINDOW"  : str(arc_win),
         })
 
-    # ── TAB 3: Glossary Suggest (mới) ─────────────────────────────
+    # ── TAB 3: Glossary Suggest ────────────────────────────────────
     with tabs[3]:
         st.markdown("#### Scout Glossary Suggest")
         st.caption(
@@ -1100,7 +1145,7 @@ def render_settings() -> None:
 def main() -> None:
     with st.sidebar:
         st.markdown("## 📖 LiTTrans")
-        st.caption("v4.4 — LitRPG / Tu Tiên Pipeline")
+        st.caption("v4.5 — LitRPG / Tu Tiên Pipeline")
         st.divider()
 
         _pages = {
@@ -1120,7 +1165,7 @@ def main() -> None:
 
         st.divider()
 
-        # Quick progress + staging badge
+        # Quick progress
         try:
             chs   = load_chapters()
             done  = sum(1 for c in chs if c["done"])
@@ -1132,7 +1177,7 @@ def main() -> None:
             # Badge: staging terms từ Scout Suggest
             try:
                 from littrans.managers.glossary import glossary_stats
-                glos_s = glossary_stats()
+                glos_s    = glossary_stats()
                 staging_n = glos_s.get("staging", 0)
                 if staging_n:
                     st.markdown(
@@ -1145,10 +1190,13 @@ def main() -> None:
         except Exception:
             pass
 
+        # [FIX] tách biệt trạng thái: translate pipeline vs clean operations
         if S.running:
-            st.warning("🔄 Đang chạy…")
+            st.warning("🔄 Pipeline đang chạy…")
         if S.rt_running:
             st.info("↺ Đang dịch lại…")
+        if S.clean_running:
+            st.info("🧹 Đang clean…")
 
         st.divider()
         st.caption(f"Root: `{_ROOT.name}`")

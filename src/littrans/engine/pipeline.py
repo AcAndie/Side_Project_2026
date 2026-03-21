@@ -6,15 +6,14 @@ Luồng (USE_THREE_CALL=true — mặc định):
   ② Vòng lặp tuần tự:
        a. Scout refresh (nếu đến kỳ) + Pre-call
        b. Translation call (plain text)
-       c. [v5.0] post_processor.run() — 14-pass code cleanup (không AI)
-       d. Post-call (review + metadata) — nhận input đã sạch
-       e. Retry Trans-call nếu Post báo retry_required
-       f. Sync staging → Active
+       c. Post-call (review + auto_fix + metadata)
+       d. Retry Trans-call nếu Post báo retry_required
+       e. Sync staging → Active
   ③ Retry pass (RETRY_FAILED_PASSES vòng)
   ④ Final sync + Auto-merge + Tổng kết
 
-[v5.0] Tích hợp post_processor.py — thay thế hoàn toàn _auto_fix_call().
-       Log các thay đổi code-cleanup để debug.
+Luồng cũ (USE_THREE_CALL=false):
+  Giữ nguyên như v4.1 — 1 call nặng với structured JSON output.
 """
 from __future__ import annotations
 
@@ -22,12 +21,11 @@ import os
 import re
 import time
 import logging
-import tempfile
 from pathlib import Path
 
 from littrans.config.settings import settings
 from littrans.utils.io_utils import load_text, atomic_write
-from littrans.utils.post_processor import run as post_process, report as pp_report
+from littrans.utils.text_normalizer import normalize as normalize_text
 from littrans.managers.glossary   import filter_glossary, add_new_terms, has_pending_terms, count_pending_terms
 from littrans.managers.characters import (filter_characters, update_from_response,
                                            sync_staging_to_active, has_staging_chars,
@@ -39,9 +37,9 @@ from littrans.engine.scout        import run as scout_run, should_refresh, load_
 from littrans.engine.prompt_builder import build as build_prompt, build_translation_prompt
 from littrans.engine.quality_guard  import check as quality_check, build_retry_prompt
 from littrans.llm.client import (
-        call_gemini, call_translation, call_gemini_translation,
-        translation_model_info, is_rate_limit, handle_api_error, key_pool,
-    )
+    call_gemini, call_translation,
+    translation_model_info, is_rate_limit, handle_api_error, key_pool,
+)
 
 
 class Pipeline:
@@ -59,6 +57,7 @@ class Pipeline:
     # ── Public ────────────────────────────────────────────────────
 
     def run(self) -> None:
+        """Dịch tất cả chương chưa có bản dịch."""
         if not settings.input_dir.exists():
             print(f"❌ Không tìm thấy '{settings.input_dir}'."); return
 
@@ -112,6 +111,7 @@ class Pipeline:
         self._print_summary(total_ok, total_fail, failed)
 
     def retranslate(self, filename: str, update_data: bool = False) -> None:
+        """Dịch lại 1 chương cụ thể."""
         all_files = self.sorted_inputs()
         if filename not in all_files:
             print(f"❌ Không tìm thấy '{filename}'."); return
@@ -147,9 +147,14 @@ class Pipeline:
         chapter_index   : int,
         skip_data_update: bool = False,
     ) -> bool:
-        text = load_text(filepath)
-        if not text.strip():
+        """Dịch 1 chương. Dispatch sang 3-call hoặc 1-call tùy settings."""
+        raw_text = load_text(filepath)
+        if not raw_text.strip():
             print(f"  ⚠️  File rỗng: {filename}"); return False
+
+        # Chuẩn hóa text: gom dòng vỡ, xóa dòng trống thừa trong box, v.v.
+        text = normalize_text(raw_text)
+
         if settings.min_chars_per_chapter > 0 and len(text) < settings.min_chars_per_chapter:
             print(f"  ⚠️  Chương ngắn: {len(text)} ký tự")
 
@@ -175,6 +180,7 @@ class Pipeline:
         skip_data_update: bool,
     ) -> bool:
 
+        # Chuẩn bị context (dùng chung cho Pre và Trans call)
         glossary_ctx  = filter_glossary(text)
         char_profiles = filter_characters(text)
         arc_mem       = load_arc_memory()
@@ -191,23 +197,16 @@ class Pipeline:
         from littrans.engine.pre_processor import run as pre_run
         chapter_map = pre_run(text, name_lock, char_profiles, known_skills)
         if chapter_map.ok:
-            scene_info = ""
-            if chapter_map.has_scene_plan():
-                tone_str  = f" | tone:{chapter_map.chapter_tone}" if chapter_map.chapter_tone else ""
-                beats_str = f" | {len(chapter_map.scene_beats)} beats" if chapter_map.scene_beats else ""
-                pov_str   = f" | POV:{chapter_map.pov_character}" if chapter_map.pov_character else ""
-                scene_info = pov_str + tone_str + beats_str
             print(f"  ✅ Chapter map: {len(chapter_map.active_names)} tên · "
                   f"{len(chapter_map.active_skills)} skill · "
                   f"{len(chapter_map.pronoun_pairs)} pronoun pair"
-                  + (f" · {len(chapter_map.scene_warnings)} cảnh báo" if chapter_map.scene_warnings else "")
-                  + scene_info)
+                  + (f" · {len(chapter_map.scene_warnings)} cảnh báo" if chapter_map.scene_warnings else ""))
         else:
             print(f"  ⚠️  Pre-call thất bại → dịch không có chapter map")
 
         time.sleep(settings.pre_call_sleep)
 
-        # ── Step 2: Build system prompt ───────────────────────────
+        # ── Step 2: Translation call + retry loop ─────────────────
         system_prompt = build_translation_prompt(
             instructions    = self._instructions,
             glossary_ctx    = glossary_ctx,
@@ -221,7 +220,6 @@ class Pipeline:
             chapter_text    = text,
         )
 
-        # ── Step 3: Translation call + retry loop ─────────────────
         translation       = ""
         retry_instruction = ""
         max_trans         = settings.max_retries
@@ -233,14 +231,9 @@ class Pipeline:
                     f"⚠️ RETRY — {retry_instruction}\n\n---\n\n{text}"
                     if retry_instruction else text
                 )
-                raw_translation = call_translation(system_prompt, input_text)
+                translation = call_translation(system_prompt, input_text)
 
-                # ── [v5.0] 14-pass code cleanup — NGAY SAU Trans-call ──
-                translation, pp_changes = post_process(raw_translation)
-                if pp_changes:
-                    print(pp_report(pp_changes))
-
-                # Mechanical quality check
+                # Mechanical quality check (nhanh, không tốn API call)
                 ok_mech, mech_msg = quality_check(translation, text)
                 if not ok_mech:
                     print(f"  ⚠️  Lỗi cơ học ({attempt}/{max_trans}): {mech_msg}")
@@ -251,7 +244,7 @@ class Pipeline:
                     else:
                         print(f"  ⚠️  Vẫn còn lỗi cơ học sau {max_trans} lần.")
 
-                break
+                break  # Translation pass — sang Post-call
 
             except Exception as e:
                 logging.error(f"{filename} | trans attempt {attempt} | {e}")
@@ -266,49 +259,62 @@ class Pipeline:
 
         time.sleep(settings.post_call_sleep)
 
-        # ── Step 4: Post-call + retry loop ────────────────────────
-        from littrans.engine.post_analyzer import run as post_run
+        # ── Step 3: Post-call + retry loop ────────────────────────
+        from littrans.engine.post_analyzer import run as post_run, PostResult
+
+        # Init an toàn — đảm bảo luôn có giá trị dù loop bị break sớm
+        post_result = PostResult(
+            final_translation = translation,
+            passed            = True,
+            ok                = False,
+        )
 
         final_translation = translation
-        post_result       = None
 
         for post_attempt in range(1, settings.post_call_max_retries + 2):
             print(f"  🔎 Post-call {post_attempt}/{settings.post_call_max_retries + 1}...")
             post_result = post_run(text, final_translation, chapter_map, filename)
 
             if not post_result.ok:
+                # Post-call lỗi hoàn toàn — dùng bản dịch hiện tại và tiếp tục
                 print(f"  ⚠️  Post-call không hoạt động → dùng bản dịch hiện tại")
                 break
 
-            # Log issues (không còn auto_fix — chỉ warn và retry_required)
+            # Log auto-fix
+            if post_result.auto_fixed:
+                fix_count = sum(1 for i in post_result.issues if i.severity == "auto_fix")
+                print(f"  🔧 Auto-fixed {fix_count} lỗi trình bày")
+                final_translation = post_result.final_translation
+
+            # Log issues
             if post_result.issues:
                 for issue in post_result.issues:
-                    icon = "⚠️" if issue.severity == "retry_required" else "💡"
+                    icon = "🔧" if issue.severity == "auto_fix" else "⚠️"
                     print(f"     {icon} [{issue.type}] {issue.detail[:80]}")
 
             if post_result.passed or not post_result.has_retry_required():
                 break
 
+            # Có retry_required → retry Trans-call nếu còn lượt
             if (settings.trans_retry_on_quality
                     and post_attempt <= settings.post_call_max_retries):
                 print(f"  🔄 Retry Trans-call do lỗi dịch thuật...")
                 retry_instruction = post_result.retry_instruction
                 time.sleep(settings.post_call_sleep)
 
+                # Retry Trans-call
                 try:
                     input_text = f"⚠️ RETRY — {retry_instruction}\n\n---\n\n{text}"
-                    raw_retry  = call_translation(system_prompt, input_text)
-                    # [v5.0] cleanup lại sau retry
-                    final_translation, pp_changes = post_process(raw_retry)
-                    if pp_changes:
-                        print(pp_report(pp_changes))
+                    final_translation = call_translation(system_prompt, input_text)
                     time.sleep(settings.post_call_sleep)
                 except Exception as e:
                     logging.error(f"{filename} | post retry trans | {e}")
                     print(f"  ❌ Retry Trans lỗi: {e}")
-                    break
+                    break  # không block pipeline
             else:
-                print(f"  ⚠️  Hết lượt retry → ghi file để review")
+                # Hết lượt retry
+                print(f"  ⚠️  Vẫn còn lỗi dịch thuật sau {settings.post_call_max_retries} lần retry → ghi file để review")
+                final_translation = post_result.final_translation
                 break
 
         # ── Name Lock validate ────────────────────────────────────
@@ -324,7 +330,7 @@ class Pipeline:
         print(f"  ✅ Dịch xong: {filename}")
 
         # ── Update data từ Post-call metadata ─────────────────────
-        if not skip_data_update and post_result and post_result.ok:
+        if not skip_data_update and post_result.ok:
             self._update_data_from_post(post_result, filename, chapter_index, char_profiles)
 
         touch_seen(list(char_profiles.keys()), chapter_index)
@@ -341,6 +347,7 @@ class Pipeline:
         chapter_index   : int,
         skip_data_update: bool,
     ) -> bool:
+        """Flow cũ — giữ nguyên logic v4.1."""
         glossary_ctx  = filter_glossary(text)
         char_profiles = filter_characters(text)
         arc_mem       = load_arc_memory()
@@ -375,12 +382,6 @@ class Pipeline:
                 )
 
                 result = call_gemini(system_prompt, input_text)
-
-                # [v5.0] cleanup 1-call output cũng
-                cleaned, pp_changes = post_process(result.translation)
-                if pp_changes:
-                    print(pp_report(pp_changes))
-                result = result.model_copy(update={"translation": cleaned})
 
                 ok, msg = quality_check(result.translation, text)
                 if not ok:
@@ -436,11 +437,13 @@ class Pipeline:
     # ── Data update helpers ───────────────────────────────────────
 
     def _update_data_from_post(self, post_result, filename, chapter_index, char_profiles):
+        """Update Master State từ metadata của Post-call."""
         from littrans.llm.schemas import (
             TermDetail, CharacterDetail, RelationshipUpdate, RelationshipDetail,
             SkillUpdate, PronounEntry, HabitualBehavior,
         )
 
+        # ── new_terms ─────────────────────────────────────────────
         if post_result.new_terms:
             term_objects = []
             for t in post_result.new_terms:
@@ -458,6 +461,7 @@ class Pipeline:
                 n = add_new_terms(term_objects, filename)
                 if n: print(f"  📝 Thuật ngữ mới: {n}")
 
+        # ── skill_updates ─────────────────────────────────────────
         if post_result.skill_updates:
             skill_objects = []
             for s in post_result.skill_updates:
@@ -478,6 +482,7 @@ class Pipeline:
                 n = add_skill_updates(skill_objects, filename)
                 if n: print(f"  ⚔️  Kỹ năng mới: {n}")
 
+        # ── new_characters → CharacterDetail đầy đủ ──────────────
         char_objects = []
         if post_result.new_characters:
             for c in post_result.new_characters:
@@ -502,8 +507,6 @@ class Pipeline:
                             feeling        = r.get("feeling", ""),
                             dynamic        = r.get("dynamic", ""),
                             pronoun_status = r.get("pronoun_status", "weak"),
-                            intimacy_level = max(1, min(5, int(r.get("intimacy_level", 2)))),
-                            eps_signals    = r.get("eps_signals", []),
                             current_status = r.get("current_status", ""),
                             tension_points = r.get("tension_points", []),
                             history        = [],
@@ -547,6 +550,7 @@ class Pipeline:
                     name = c.get("name", "?")
                     logging.warning(f"[Pipeline] CharacterDetail parse lỗi [{name}]: {e}")
 
+        # ── relationship_updates → RelationshipUpdate ─────────────
         rel_objects = []
         if post_result.relationship_updates:
             for r in post_result.relationship_updates:
@@ -554,18 +558,16 @@ class Pipeline:
                     continue
                 try:
                     rel_objects.append(RelationshipUpdate(
-                        character_a        = r["character_a"],
-                        character_b        = r["character_b"],
-                        chapter            = filename,
-                        event              = r.get("event", ""),
-                        new_type           = r.get("new_type", ""),
-                        new_feeling        = r.get("new_feeling", ""),
-                        new_status         = r.get("new_status", ""),
-                        new_dynamic        = r.get("new_dynamic", ""),
-                        new_tension        = r.get("new_tension", ""),
-                        promote_to_strong  = bool(r.get("promote_to_strong", False)),
-                        new_intimacy_level = int(r.get("new_intimacy_level", 0)),
-                        new_eps_signals    = r.get("new_eps_signals", []),
+                        character_a       = r["character_a"],
+                        character_b       = r["character_b"],
+                        chapter           = filename,
+                        event             = r.get("event", ""),
+                        new_type          = r.get("new_type", ""),
+                        new_feeling       = r.get("new_feeling", ""),
+                        new_status        = r.get("new_status", ""),
+                        new_dynamic       = r.get("new_dynamic", ""),
+                        new_tension       = r.get("new_tension", ""),
+                        promote_to_strong = bool(r.get("promote_to_strong", False)),
                     ))
                 except Exception as e:
                     logging.warning(f"[Pipeline] RelationshipUpdate parse lỗi: {e}")
@@ -685,13 +687,10 @@ class Pipeline:
         print(f"\n{'═'*62}")
         trans_info  = translation_model_info()
         gemini_info = settings.gemini_model
-        print(f"  Pipeline Dịch Truyện v5.0 — Trans: {trans_info}")
+        print(f"  Pipeline Dịch Truyện v4.5 — Trans: {trans_info}")
         print(f"  Scout/Pre/Post             — Gemini: {gemini_info}")
         print(f"{'─'*62}")
         print(f"  Mode             : {mode_str}")
-        print(f"  Post-processor   : 14-pass code cleanup (không AI)")
-        print(f"  Scene Planner    : ✅ tích hợp vào Pre-call")
-        print(f"  EPS              : ✅ Scout cập nhật mỗi {settings.scout_refresh_every} chương")
         print(f"  Tổng chương      : {len(all_files)}")
         print(f"  Cần dịch         : {len(pending)}")
         print(f"  Nhân vật Active  : {stats['active']}"

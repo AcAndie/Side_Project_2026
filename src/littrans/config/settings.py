@@ -8,6 +8,7 @@ Chỉnh qua .env, KHÔNG sửa file này.
 [v4.5] Dual-Model: TRANSLATION_PROVIDER + TRANSLATION_MODEL + ANTHROPIC_API_KEY.
        Cho phép chọn model dịch thuật ngay lúc bắt đầu mà không ảnh hưởng
        đến các call khác (Scout, Pre, Post vẫn dùng Gemini).
+[v4.5.1] Bỏ ANTHROPIC_MODELS/GEMINI_MODELS chưa dùng → thêm soft validation warning.
 """
 from __future__ import annotations
 
@@ -38,22 +39,6 @@ def _env_float(key: str, default: float) -> float:
         return float(os.environ.get(key, str(default)))
     except (ValueError, TypeError):
         return default
-
-
-# ── Danh sách model hợp lệ ───────────────────────────────────────
-ANTHROPIC_MODELS = {
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5-20251001",
-}
-
-GEMINI_MODELS = {
-    "gemini-2.0-flash-exp",
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash",
-}
 
 
 def _default_translation_model() -> str:
@@ -133,6 +118,20 @@ class Settings:
     log_dir      : Path = field(default_factory=lambda: Path(_env("LOG_DIR",     "logs")))
     prompts_dir  : Path = field(default_factory=lambda: Path(_env("PROMPTS_DIR", "prompts")))
 
+    # ── Known valid model names (soft validation only — warn, không fail) ──────
+    _KNOWN_ANTHROPIC_MODELS = frozenset({
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001",
+    })
+    _KNOWN_GEMINI_MODELS = frozenset({
+        "gemini-2.0-flash-exp",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+    })
+
     def __post_init__(self) -> None:
         # Validate Gemini key (luôn cần cho Scout/Pre/Post)
         if not self.gemini_api_key:
@@ -150,6 +149,20 @@ class Settings:
             sys.exit(
                 f"❌ TRANSLATION_PROVIDER='{self.translation_provider}' không hợp lệ.\n"
                 "   Chỉ chấp nhận: gemini | anthropic"
+            )
+
+        # Soft-validate model name — chỉ cảnh báo, không fail
+        # (model mới có thể chưa trong danh sách cứng)
+        known = (
+            self._KNOWN_ANTHROPIC_MODELS
+            if self.translation_provider == "anthropic"
+            else self._KNOWN_GEMINI_MODELS
+        )
+        if self.translation_model not in known:
+            print(
+                f"⚠️  TRANSLATION_MODEL='{self.translation_model}' chưa có trong danh sách "
+                f"đã biết cho provider '{self.translation_provider}'. "
+                f"Nếu sai tên, API sẽ báo lỗi lúc chạy."
             )
 
         for p in [self.input_dir, self.output_dir, self.data_dir, self.log_dir,
