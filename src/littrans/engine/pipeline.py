@@ -280,12 +280,6 @@ class Pipeline:
                 print(f"  ⚠️  Post-call không hoạt động → dùng bản dịch hiện tại")
                 break
 
-            # Log auto-fix
-            if post_result.auto_fixed:
-                fix_count = sum(1 for i in post_result.issues if i.severity == "auto_fix")
-                print(f"  🔧 Auto-fixed {fix_count} lỗi trình bày")
-                final_translation = post_result.final_translation
-
             # Log issues
             if post_result.issues:
                 for issue in post_result.issues:
@@ -440,7 +434,7 @@ class Pipeline:
         """Update Master State từ metadata của Post-call."""
         from littrans.llm.schemas import (
             TermDetail, CharacterDetail, RelationshipUpdate, RelationshipDetail,
-            SkillUpdate, PronounEntry, HabitualBehavior,
+            SkillUpdate, PronounEntry,
         )
 
         # ── new_terms ─────────────────────────────────────────────

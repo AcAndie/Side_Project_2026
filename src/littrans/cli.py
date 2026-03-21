@@ -14,8 +14,6 @@ Commands:
 from __future__ import annotations
 
 import os
-import re
-import sys
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -143,7 +141,7 @@ def fix_names_cmd(
     clear:           bool = typer.Option(False, "--clear",        help="Xóa name_fixes.json"),
 ):
     """Sửa tên vi phạm Name Lock trong các bản dịch đã có."""
-    from littrans.tools.fix_names import cmd_list, cmd_fix, load_fixes, save_fixes
+    from littrans.tools.fix_names import cmd_list, cmd_fix, load_fixes
     from littrans.utils.io_utils import load_json
 
     fixes_path = settings.data_dir / "name_fixes.json"

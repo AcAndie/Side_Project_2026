@@ -18,7 +18,6 @@ Không raise — pipeline tiếp tục nếu Scout thất bại.
 from __future__ import annotations
 
 import os
-import re
 import logging
 
 from littrans.config.settings import settings
@@ -161,9 +160,9 @@ def _refresh_context_notes(all_files: list[str], current_index: int) -> None:
         return
 
     texts = [
-        (fn, load_text(str(settings.input_dir / fn))[:6000])
+        (fn, content[:6000])
         for fn in window
-        if load_text(str(settings.input_dir / fn)).strip()
+        if (content := load_text(str(settings.input_dir / fn))).strip()
     ]
     if not texts:
         _write_empty_note("Không đọc được nội dung chương.")
