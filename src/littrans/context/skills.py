@@ -1,25 +1,15 @@
 """
-src/littrans/managers/skills.py — Quản lý Skills.json.
+src/littrans/context/skills.py — Quản lý Skills.json.
 
-Lưu kỹ năng đã biết xuyên suốt truyện, bao gồm evolution chain.
-Dùng để:
-  1. Tra cứu tên VN đã chốt khi dịch bảng hệ thống
-  2. Nhận báo cáo kỹ năng mới/tiến hóa từ AI → cập nhật Skills.json
-  3. Filter cho prompt: chỉ đưa vào kỹ năng XUẤT HIỆN trong chương
-
-[v2.0] Refactor dùng BaseManager — public API (module-level functions) không đổi.
+[Refactor] managers/ → context/. Import: managers.base → context.base.
 """
 from __future__ import annotations
 
 import re
 
 from littrans.config.settings import settings
-from littrans.managers.base import BaseManager
+from littrans.context.base import BaseManager
 
-
-# ═══════════════════════════════════════════════════════════════════
-# MANAGER
-# ═══════════════════════════════════════════════════════════════════
 
 class SkillsManager(BaseManager):
 
@@ -34,13 +24,7 @@ class SkillsManager(BaseManager):
         evos   = sum(1 for s in skills.values() if s.get("evolved_from"))
         return {"total": len(skills), "evolution": evos, "base": len(skills) - evos}
 
-    # ── Read ──────────────────────────────────────────────────────
-
     def load_for_chapter(self, chapter_text: str) -> dict[str, dict]:
-        """
-        Trả về {english_name: skill_record} cho kỹ năng XUẤT HIỆN trong chương.
-        Đưa vào prompt phần System Box.
-        """
         skills = self._load().get("skills", {})
         result = {}
         for eng, rec in skills.items():
@@ -53,13 +37,7 @@ class SkillsManager(BaseManager):
                 result[eng] = rec
         return result
 
-    # ── Write ─────────────────────────────────────────────────────
-
     def add_updates(self, updates: list, source_chapter: str) -> int:
-        """
-        Thêm kỹ năng mới / cập nhật evolution chain vào Skills.json.
-        Trả về số kỹ năng thực sự thêm/cập nhật.
-        """
         if not updates:
             return 0
 
@@ -79,7 +57,6 @@ class SkillsManager(BaseManager):
                 if eng in skills:
                     existing = skills[eng]
                     changed  = False
-
                     if upd.evolved_from and upd.evolved_from != existing.get("evolved_from", ""):
                         existing["evolved_from"] = upd.evolved_from
                         chain = existing.setdefault(
@@ -89,11 +66,9 @@ class SkillsManager(BaseManager):
                             chain.append(vn)
                         existing["vietnamese"] = vn
                         changed = True
-
                     if upd.description and not existing.get("description"):
                         existing["description"] = upd.description
                         changed = True
-
                     if changed:
                         count += 1
                 else:
@@ -117,10 +92,7 @@ class SkillsManager(BaseManager):
         return count
 
 
-# ═══════════════════════════════════════════════════════════════════
-# MODULE-LEVEL SINGLETON + PUBLIC API
-# Call-sites không cần đổi gì.
-# ═══════════════════════════════════════════════════════════════════
+# ── Module-level singleton + public API ──────────────────────────
 
 _manager = SkillsManager(settings.skills_file)
 
@@ -130,7 +102,6 @@ def load_skills_for_chapter(chapter_text: str) -> dict[str, dict]:
 
 
 def format_skills_for_prompt(skills: dict[str, dict]) -> str:
-    """Format danh sách kỹ năng để đưa vào PHẦN 2 — system box context."""
     if not skills:
         return ""
     lines = [

@@ -1,0 +1,50 @@
+# deployments/docker-compose.yml
+# Build context là project root (..) để COPY src/ scripts/ prompts/ vv.
+services:
+
+  # ── Web UI ──────────────────────────────────────────────────────
+  ui:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    image: littrans:latest
+    container_name: littrans-ui
+    ports:
+      - "8501:8501"
+    volumes:
+      # Data directories — persist trên host
+      - ../inputs:/app/inputs
+      - ../outputs:/app/outputs
+      - ../data:/app/data
+      - ../logs:/app/logs
+      # .env mount read-only
+      - ../.env:/app/.env:ro
+      # Uncomment để override prompts mà không rebuild:
+      # - ../prompts:/app/prompts:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app/src
+    restart: unless-stopped
+    command: python scripts/run_ui.py --host 0.0.0.0
+
+  # ── CLI ─────────────────────────────────────────────────────────
+  # Chỉ start khi gọi tường minh: docker compose -f deployments/docker-compose.yml run --rm cli <cmd>
+  cli:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    image: littrans:latest
+    container_name: littrans-cli
+    profiles:
+      - cli
+    volumes:
+      - ../inputs:/app/inputs
+      - ../outputs:/app/outputs
+      - ../data:/app/data
+      - ../logs:/app/logs
+      - ../.env:/app/.env:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app/src
+    # command được override khi chạy, ví dụ:
+    #   docker compose -f deployments/docker-compose.yml run --rm cli python scripts/main.py translate

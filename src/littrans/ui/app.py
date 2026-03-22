@@ -27,6 +27,7 @@ for _p in [str(_ROOT), str(_ROOT / "src")]:
         sys.path.insert(0, _p)
 
 import streamlit as st
+from littrans.ui.bible_ui import render_bible_tab as render_bible
 import streamlit.components.v1 as components
 
 st.set_page_config(
@@ -160,7 +161,7 @@ def load_chapters() -> list[dict]:
 @st.cache_data(ttl=4)
 def load_characters() -> dict[str, dict]:
     try:
-        from littrans.managers.characters import load_active, load_archive
+        from littrans.context.characters import load_active, load_archive
         return {
             "active" : load_active().get("characters", {}),
             "archive": load_archive().get("characters", {}),
@@ -172,7 +173,7 @@ def load_characters() -> dict[str, dict]:
 @st.cache_data(ttl=4)
 def load_glossary_data() -> dict[str, list[tuple[str, str]]]:
     try:
-        from littrans.managers.glossary import _load_all
+        from littrans.context.glossary import _load_all
         raw = _load_all()
     except (Exception, SystemExit):
         return {}
@@ -193,10 +194,10 @@ def load_glossary_data() -> dict[str, list[tuple[str, str]]]:
 @st.cache_data(ttl=5)
 def load_stats() -> dict:
     try:
-        from littrans.managers.characters import character_stats
-        from littrans.managers.glossary   import glossary_stats
-        from littrans.managers.skills     import skills_stats
-        from littrans.managers.name_lock  import lock_stats
+        from littrans.context.characters import character_stats
+        from littrans.context.glossary   import glossary_stats
+        from littrans.context.skills     import skills_stats
+        from littrans.context.name_lock  import lock_stats
         return {
             "chars" : character_stats(),
             "glos"  : glossary_stats(),
@@ -474,7 +475,7 @@ def _render_chapter_detail(ch: dict) -> None:
     nl_count = 0
     if ch["done"] and ch["vn"]:
         try:
-            from littrans.managers.name_lock import build_name_lock_table, validate_translation
+            from littrans.context.name_lock import build_name_lock_table, validate_translation
             nl_count = len(validate_translation(ch["vn"], build_name_lock_table()))
         except (Exception, SystemExit):
             pass
@@ -1185,7 +1186,7 @@ def main() -> None:
 
             # Badge: staging terms từ Scout Suggest
             try:
-                from littrans.managers.glossary import glossary_stats
+                from littrans.context.glossary import glossary_stats
                 glos_s    = glossary_stats()
                 staging_n = glos_s.get("staging", 0)
                 if staging_n:

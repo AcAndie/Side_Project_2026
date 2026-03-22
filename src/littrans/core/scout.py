@@ -1,19 +1,8 @@
 """
-src/littrans/engine/scout.py — Scout AI.
+src/littrans/core/scout.py — Scout AI.
 
-Mỗi SCOUT_REFRESH_EVERY chương:
-  1. Xóa Context_Notes cũ → sinh mới (4 mục)
-  2. Append Arc_Memory (tóm tắt window)
-  3. [v4] Cập nhật emotional_state nhân vật
-  4. [v4.4] Đề xuất thuật ngữ mới → Staging_Terms.md
-
-Không raise — pipeline tiếp tục nếu Scout thất bại.
-
-[v4.2] Validate emotional_states là list + giá trị hợp lệ trước khi ghi DB.
-[v4.3 FIX] Xoá dead import `from google.genai import types`.
 [v4.4] Thêm _suggest_new_terms() — Scout Glossary Suggest.
-       Chạy call riêng (call_gemini_json) sau context notes để không nhiễu 4 mục chính.
-       Có thể tắt qua SCOUT_SUGGEST_GLOSSARY=false.
+[Refactor] engine → core, managers → context.
 """
 from __future__ import annotations
 
@@ -120,7 +109,7 @@ def run(all_files: list[str], current_index: int) -> None:
     if window:
         range_label = f"{window[0]} → {window[-1]}"
         try:
-            from littrans.managers.memory import append_arc_summary
+            from littrans.context.memory import append_arc_summary
             append_arc_summary(all_files, current_index, range_label)
         except Exception as e:
             logging.error(f"Arc Memory: {e}")
@@ -304,18 +293,6 @@ def _update_emotional_states(all_files: list[str], current_index: int) -> None:
 # ── Glossary Suggest ──────────────────────────────────────────────
 
 def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
-    """
-    Đề xuất thuật ngữ mới từ window hiện tại → ghi vào Staging_Terms.md.
-
-    Luồng:
-      1. Đọc 5 chương EN gần nhất trong window (tiết kiệm token)
-      2. Load existing_terms_set() để dedup
-      3. call_gemini_json() với _GLOSSARY_SUGGEST_SYSTEM
-      4. Filter theo confidence >= SCOUT_SUGGEST_MIN_CONFIDENCE
-      5. Gọi add_new_terms() → staging (nếu IMMEDIATE_MERGE=false) hoặc trực tiếp vào category file
-
-    Chỉ chạy khi SCOUT_SUGGEST_GLOSSARY=true. Không raise.
-    """
     if not settings.scout_suggest_glossary:
         return
 
@@ -324,8 +301,6 @@ def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
     if not window:
         return
 
-    # Chỉ đọc EN (chưa có bản dịch VN cho window này)
-    # Giới hạn 5 chương gần nhất để tiết kiệm token
     texts = []
     for fn in window[-5:]:
         text = load_text(str(settings.input_dir / fn))
@@ -335,11 +310,9 @@ def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
     if not texts:
         return
 
-    # Load existing terms để dedup
-    from littrans.managers.glossary import existing_terms_set
+    from littrans.context.glossary import existing_terms_set
     known = existing_terms_set()
 
-    # Giới hạn danh sách "đã biết" để không bloat prompt (200 terms đủ để dedup tốt)
     known_sample = sorted(known)[:200]
     known_block  = "\n".join(f"- {t}" for t in known_sample)
     if len(known) > 200:
@@ -367,7 +340,6 @@ def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
     if not isinstance(suggestions, list) or not suggestions:
         return
 
-    # Filter theo confidence + dedup với known set
     from littrans.llm.schemas import TermDetail
 
     filtered: list[TermDetail] = []
@@ -386,7 +358,6 @@ def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
         except (ValueError, TypeError):
             pass
 
-        # Validate
         if not eng or not vn:
             continue
         if conf < settings.scout_suggest_min_confidence:
@@ -396,7 +367,6 @@ def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
         if len(filtered) >= settings.scout_suggest_max_terms:
             break
 
-        # Normalize category
         if cat not in ("pathways", "organizations", "items", "locations", "general"):
             cat = "general"
 
@@ -413,13 +383,12 @@ def _suggest_new_terms(all_files: list[str], current_index: int) -> None:
     if not filtered:
         return
 
-    from littrans.managers.glossary import add_new_terms
+    from littrans.context.glossary import add_new_terms
 
     source_label = f"scout_suggest_{window[-1]}"
     n = add_new_terms(filtered, source_label)
 
     if n:
-        # Log tóm tắt theo category
         cats: dict[str, int] = {}
         for t in filtered[:n]:
             cats[t.category] = cats.get(t.category, 0) + 1

@@ -1,7 +1,7 @@
 """
-src/littrans/tools/fix_names.py — Sửa tên vi phạm Name Lock.
+src/littrans/cli/tool_fix.py — Sửa tên vi phạm Name Lock.
 
-Đọc data/name_fixes.json → thay tên sai bằng tên đúng trong outputs/.
+[Refactor] tools/fix_names.py → cli/tool_fix.py. managers → context.
 """
 from __future__ import annotations
 
@@ -9,10 +9,9 @@ import re
 from pathlib import Path
 
 from littrans.config.settings import settings
+from littrans.context.name_lock import build_name_lock_table
 from littrans.utils.io_utils import load_json, save_json, atomic_write
 
-
-# ── I/O ───────────────────────────────────────────────────────────
 
 def load_fixes(fixes_path: Path) -> dict:
     return load_json(fixes_path) or {"fixes": {}}
@@ -21,8 +20,6 @@ def load_fixes(fixes_path: Path) -> dict:
 def save_fixes(data: dict, fixes_path: Path) -> None:
     save_json(fixes_path, data)
 
-
-# ── Core logic ────────────────────────────────────────────────────
 
 def apply_fixes_to_text(text: str, fixes: dict) -> tuple[str, list[str]]:
     changes: list[str] = []
@@ -50,13 +47,10 @@ def apply_fixes_to_text(text: str, fixes: dict) -> tuple[str, list[str]]:
 def get_target_files(fixes: dict, all_chapters: bool) -> list[str]:
     if not settings.output_dir.exists():
         return []
-    all_files = [f for f in settings.output_dir.iterdir()
-                 if f.suffix in (".txt", ".md")]
+    all_files = [f for f in settings.output_dir.iterdir() if f.suffix in (".txt", ".md")]
     all_names = [f.name for f in all_files]
-
     if all_chapters:
         return sorted(all_names)
-
     affected: set[str] = set()
     for entry in fixes.values():
         if entry.get("fixed"):
@@ -69,20 +63,15 @@ def get_target_files(fixes: dict, all_chapters: bool) -> list[str]:
     return sorted(affected)
 
 
-# ── Commands ──────────────────────────────────────────────────────
-
 def cmd_list(data: dict) -> None:
     fixes   = data.get("fixes", {})
     pending = {k: v for k, v in fixes.items() if not v.get("fixed")}
     done    = {k: v for k, v in fixes.items() if v.get("fixed")}
-
     print(f"\n{'─'*62}")
     print(f"  NAME FIXES — {len(pending)} chờ sửa, {len(done)} đã sửa")
     print(f"{'─'*62}")
-
     if not fixes:
         print("  ✅ Không có vi phạm nào."); return
-
     if pending:
         print(f"\n  {'TÊN SAI':<35} TÊN ĐÚNG")
         print(f"  {'─'*60}")
@@ -101,44 +90,32 @@ def cmd_list(data: dict) -> None:
 def cmd_fix(data: dict, fixes_path: Path, all_chapters: bool = False, dry_run: bool = False) -> None:
     fixes   = data.get("fixes", {})
     pending = {k: v for k, v in fixes.items() if not v.get("fixed")}
-
     if not pending:
         print("✅ Không có vi phạm nào cần sửa."); return
-
     target_files = get_target_files(pending, all_chapters)
     if not target_files:
         print(f"⚠️  Không tìm thấy file nào trong '{settings.output_dir}'."); return
-
     mode  = "DRY RUN — " if dry_run else ""
     scope = "toàn bộ chương" if all_chapters else f"{len(target_files)} chương bị vi phạm"
     print(f"\n{'═'*62}")
     print(f"  {mode}Sửa tên — {len(pending)} vi phạm · {scope}")
     print(f"{'═'*62}\n")
-
-    total_files   = 0
-    total_changes = 0
-
+    total_files = total_changes = 0
     for fn in target_files:
         filepath = settings.output_dir / fn
         try:
             original = filepath.read_text(encoding="utf-8")
         except Exception as e:
             print(f"  ⚠️  Không đọc được {fn}: {e}"); continue
-
         new_text, changes = apply_fixes_to_text(original, pending)
         if not changes:
             continue
-
         total_files   += 1
-        total_changes += sum(
-            int(m.group(1)) for c in changes
-            if (m := re.search(r"\((\d+)", c))
-        )
+        total_changes += sum(int(m.group(1)) for c in changes if (m := re.search(r"\((\d+)", c)))
         print(f"  {'[DRY]' if dry_run else '✏️ '} {fn}")
         for c in changes: print(f"       {c}")
         if not dry_run:
             atomic_write(filepath, new_text)
-
     if not dry_run and total_files > 0:
         for wrong in pending:
             fixes[wrong]["fixed"]    = True

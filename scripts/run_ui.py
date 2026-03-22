@@ -1,10 +1,10 @@
 """
-run_ui.py — Khởi động LiTTrans Web UI
+scripts/run_ui.py — Khởi động LiTTrans Web UI
 
 Cách dùng:
-    python run_ui.py
-    python run_ui.py --port 8502
-    python run_ui.py --host 0.0.0.0 --port 8080
+    python scripts/run_ui.py
+    python scripts/run_ui.py --port 8502
+    python scripts/run_ui.py --host 0.0.0.0 --port 8080
 """
 import sys
 import subprocess
@@ -12,7 +12,9 @@ from pathlib import Path
 
 
 def main() -> None:
-    ui_app = Path(__file__).parent / "src" / "littrans" / "ui" / "app.py"
+    # scripts/ nằm trong <project_root>/scripts/ → UI app ở <project_root>/src/
+    project_root = Path(__file__).parent.parent
+    ui_app = project_root / "src" / "littrans" / "ui" / "app.py"
 
     if not ui_app.exists():
         print(f"❌ Không tìm thấy: {ui_app}")

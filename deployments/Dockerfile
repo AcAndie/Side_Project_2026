@@ -1,6 +1,7 @@
+# deployments/Dockerfile
+# Build context = project root (set trong docker-compose.yml)
+
 # ── Stage 1: Builder ─────────────────────────────────────────────
-# Cài compiler để build pyahocorasick (C extension) và các wheel khác.
-# Compiler không đi vào image runtime.
 FROM python:3.11-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -10,7 +11,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY pyproject.toml requirements.txt ./
 
-# Build tất cả wheels tại đây — bao gồm pyahocorasick cần gcc
 RUN pip install --upgrade pip && \
     pip wheel --no-cache-dir --no-deps --wheel-dir /build/wheels \
     "google-genai>=1.0" \
@@ -24,49 +24,46 @@ RUN pip install --upgrade pip && \
 
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────
-# Image gọn nhẹ: chỉ cài wheels đã build sẵn, không cần gcc.
 FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
-# Cài từ wheels đã build — không compile lại
 COPY --from=builder /build/wheels /tmp/wheels
 RUN pip install --no-cache-dir /tmp/wheels/*.whl && \
     rm -rf /tmp/wheels
 
-# Source code và prompts (baked vào image)
+# Source code và scripts (từ project root)
 COPY src/          ./src/
-COPY main.py       ./
-COPY run_ui.py     ./
+COPY scripts/      ./scripts/
 COPY prompts/      ./prompts/
 
-# Tạo sẵn thư mục data — sẽ bị override bởi bind mounts khi chạy
+# Tạo sẵn thư mục data
 RUN mkdir -p \
     inputs outputs logs \
     data/glossary data/characters \
     data/skills data/memory
 
-# Non-root user để tăng security
+# Non-root user
 RUN useradd -m -u 1000 -s /bin/bash littrans && \
     chown -R littrans:littrans /app
 USER littrans
 
-# Environment
+# PYTHONPATH → Python tìm được src/littrans/
 ENV PYTHONUNBUFFERED=1 \
     PYTHONUTF8=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app/src
 
 EXPOSE 8501
 
-# Health check dùng urllib stdlib — không cần cài curl
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD python -c \
     "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')" \
     || exit 1
 
-# Entrypoint script khởi tạo thư mục và kiểm tra .env
-COPY --chown=littrans:littrans docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+# docker-entrypoint.sh giờ nằm trong deployments/
+COPY --chown=littrans:littrans deployments/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 ENTRYPOINT ["docker-entrypoint.sh"]
 
-# Default: khởi động Web UI
-CMD ["python", "run_ui.py", "--host", "0.0.0.0"]
+# Default: Web UI via scripts/
+CMD ["python", "scripts/run_ui.py", "--host", "0.0.0.0"]

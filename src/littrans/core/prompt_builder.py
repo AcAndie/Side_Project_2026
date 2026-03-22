@@ -1,27 +1,7 @@
 """
-src/littrans/engine/prompt_builder.py — Xây dựng system prompt.
+src/littrans/core/prompt_builder.py — Xây dựng system prompt.
 
-Hai entry points:
-  build()                   → prompt đầy đủ 8 phần (flow cũ — 1 call)
-  build_translation_prompt() → prompt dịch thuần túy (3-call flow — Trans-call)
-                               không có JSON_OUTPUT section
-                               có thêm Chapter Map từ Pre-call
-                               có thêm EPS summary (v5.0)
-
-Cấu trúc build_translation_prompt() — 9 phần (thêm EPS so với v4):
-  1. Hướng dẫn dịch chung
-  2. Glossary + Skills đã biết
-  3. Character profiles (+ Emotion warning + EPS)  ← v5.0: thêm EPS block
-  4. Chapter Map (từ Pre-call: tên/skill/pronoun + Scene Plan)  ← v5.0: Scene Plan
-  5. Yêu cầu output (plain text)
-  6. Arc Memory
-  7. Context Notes Scout AI
-  8. Name Lock Table
-
-[v4] Token Budget: nếu budget_limit > 0 → smart truncation.
-[v5.0] Inject EPS summary sau Character profiles.
-       Inject Scene Plan từ ChapterMap (pov, beats, tone).
-[v5.2] Fix EPS silent pass: dùng logging.warning thay vì pass.
+[Refactor] engine → core, managers → context.
 """
 from __future__ import annotations
 
@@ -73,7 +53,7 @@ def build(
 
     parts += _arc_and_notes_sections(arc_memory_text, context_notes)
 
-    from littrans.managers.name_lock import format_for_prompt as fmt_lock
+    from littrans.context.name_lock import format_for_prompt as fmt_lock
     parts.append(_section(
         "PHẦN 8 — NAME LOCK TABLE (bảng tên đã chốt — BẮT BUỘC tuân theo)",
         fmt_lock(name_lock_table or {}),
@@ -94,16 +74,10 @@ def build_translation_prompt(
     context_notes   : str = "",
     name_lock_table : dict[str, str] | None = None,
     known_skills    : dict[str, dict] | None = None,
-    chapter_map     = None,   # ChapterMap | None
+    chapter_map     = None,
     budget_limit    : int = 0,
     chapter_text    : str = "",
 ) -> str:
-    """
-    Assemble system prompt cho Translation call (3-call flow).
-
-    v5.0: Thêm EPS summary vào Phần 3 và Scene Plan vào Phần 4.
-    v5.2: Fix EPS exception → logging thay vì pass.
-    """
     glossary_ctx, char_profiles, arc_memory_text = _apply_budget_if_needed(
         budget_limit, instructions, "",
         name_lock_table or {}, context_notes, arc_memory_text,
@@ -121,20 +95,18 @@ def build_translation_prompt(
     # Phần 3: Character profiles + EPS summary
     char_body = _fmt_characters(char_profiles)
 
-    # Inject EPS summary nếu có dữ liệu
     if char_profiles and chapter_text:
         try:
-            from littrans.managers.characters import format_eps_summary
+            from littrans.context.characters import format_eps_summary
             eps_block = format_eps_summary(char_profiles, chapter_text)
             if eps_block:
                 char_body = char_body + "\n\n" + eps_block
         except Exception as _e:
-            # EPS là optional — không block pipeline, nhưng log để debug
             logging.warning(f"[PromptBuilder] EPS format lỗi: {_e}")
 
     parts.append(_section("PHẦN 3 — PROFILE NHÂN VẬT", char_body))
 
-    # Phần 4: Chapter Map (tên/skill/pronoun + Scene Plan)
+    # Phần 4: Chapter Map
     if chapter_map and not chapter_map.is_empty():
         parts.append(_section(
             "PHẦN 4 — CHAPTER MAP (đã phân tích trước — ưu tiên cao)",
@@ -146,7 +118,6 @@ def build_translation_prompt(
             "Không có chapter map. Suy luận xưng hô và tên từ các phần trên.",
         ))
 
-    # Phần 5: Yêu cầu output plain text
     parts.append(_section(
         "PHẦN 5 — YÊU CẦU ĐẦU RA",
         _translation_output_requirements(),
@@ -154,7 +125,7 @@ def build_translation_prompt(
 
     parts += _arc_and_notes_sections(arc_memory_text, context_notes)
 
-    from littrans.managers.name_lock import format_for_prompt as fmt_lock
+    from littrans.context.name_lock import format_for_prompt as fmt_lock
     parts.append(_section(
         "PHẦN 8 — NAME LOCK TABLE (bảng tên đã chốt — BẮT BUỘC tuân theo)",
         fmt_lock(name_lock_table or {}),
@@ -201,7 +172,7 @@ def _fmt_glossary(ctx: dict[str, list[str]], known_skills: dict[str, dict]) -> s
         has_content = True
 
     if known_skills:
-        from littrans.managers.skills import format_skills_for_prompt
+        from littrans.context.skills import format_skills_for_prompt
         skill_block = format_skills_for_prompt(known_skills)
         if skill_block:
             parts.append(skill_block)
@@ -275,7 +246,7 @@ def _apply_budget_if_needed(
 
     import re as _re
     from littrans.llm.token_budget import BudgetContext, apply_budget
-    from littrans.managers.name_lock import format_for_prompt as fmt_lock
+    from littrans.context.name_lock import format_for_prompt as fmt_lock
 
     arc_entries = (
         [e for e in _re.split(r"\n---\n", arc_memory_text)

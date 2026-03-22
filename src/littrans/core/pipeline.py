@@ -1,31 +1,7 @@
 """
-src/littrans/engine/pipeline.py — Điều phối pipeline dịch tuần tự.
+src/littrans/core/pipeline.py — Điều phối pipeline dịch tuần tự.
 
-Luồng (3-call, mặc định duy nhất từ v5.1):
-  ① Nạp tài liệu, lọc chương chưa dịch
-  ② Vòng lặp tuần tự:
-       a. Scout refresh (nếu đến kỳ) + Pre-call
-       b. Translation call (plain text)
-       c. Post-processor: 14-pass code cleanup (TRƯỚC quality_check)
-       d. Quality check cơ học
-       e. Post-call (review + metadata)
-       f. Retry Trans-call nếu Post báo retry_required
-       g. Sync staging → Active
-  ③ Retry pass (RETRY_FAILED_PASSES vòng)
-  ④ Final sync + Auto-merge + Tổng kết
-
-[v5.1] post_processor.run() được gọi ngay sau mỗi call_translation(),
-       TRƯỚC quality_check() và Post-call. Đảm bảo AI Review thấy text
-       đã clean → giảm false positive "retry_required".
-
-[v5.1] Bible mode: bỏ qua filter_glossary/chars/arc_mem khi
-       bible_mode=True — tất cả context đến từ BibleStore.
-
-[v5.2] Xóa legacy 1-call flow (USE_THREE_CALL). Pipeline luôn dùng 3-call.
-       Fix silent exception trong Bible mode → logging thay vì pass.
-
-[v5.3] Phase 3 refactor: imports top-level, _update_data_from_post dùng
-       module-level helpers _parse_list / _parse_characters / _parse_relationships.
+[v5.3] Phase 3 refactor: engine → core, managers → context, tools → cli.
 """
 from __future__ import annotations
 
@@ -39,18 +15,18 @@ from pydantic import ValidationError
 
 from littrans.config.settings import settings
 from littrans.utils.io_utils import load_text, atomic_write
-from littrans.utils.text_normalizer import normalize as normalize_text
-from littrans.utils.post_processor  import run as pp_run, report as pp_report
-from littrans.managers.glossary   import filter_glossary, add_new_terms, has_pending_terms, count_pending_terms
-from littrans.managers.characters import (filter_characters, update_from_response,
-                                           sync_staging_to_active, has_staging_chars,
-                                           rotate_to_archive, touch_seen, character_stats)
-from littrans.managers.skills     import load_skills_for_chapter, add_skill_updates, skills_stats
-from littrans.managers.name_lock  import build_name_lock_table, validate_translation, lock_stats
-from littrans.managers.memory     import load_recent as load_arc_memory
-from littrans.engine.scout        import run as scout_run, should_refresh, load_context_notes
-from littrans.engine.prompt_builder import build as build_prompt, build_translation_prompt
-from littrans.engine.quality_guard  import check as quality_check
+from littrans.core.text_normalizer import normalize as normalize_text
+from littrans.core.post_processor  import run as pp_run, report as pp_report
+from littrans.context.glossary   import filter_glossary, add_new_terms, has_pending_terms, count_pending_terms
+from littrans.context.characters import (filter_characters, update_from_response,
+                                          sync_staging_to_active, has_staging_chars,
+                                          rotate_to_archive, touch_seen, character_stats)
+from littrans.context.skills     import load_skills_for_chapter, add_skill_updates, skills_stats
+from littrans.context.name_lock  import build_name_lock_table, validate_translation, lock_stats
+from littrans.context.memory     import load_recent as load_arc_memory
+from littrans.core.scout         import run as scout_run, should_refresh, load_context_notes
+from littrans.core.prompt_builder  import build as build_prompt, build_translation_prompt
+from littrans.core.quality_guard   import check as quality_check
 from littrans.llm.client import (
     call_translation,
     translation_model_info, is_rate_limit, handle_api_error, key_pool,
@@ -60,7 +36,7 @@ from littrans.llm.schemas import (
 )
 
 
-# ── Pipeline data-parsing helpers ─────────────────────────────────────────────
+# ── Pipeline data-parsing helpers ────────────────────────────────
 
 def _parse_list(raw: list, model_cls, label: str) -> list:
     """Parse list[dict] → list[PydanticModel], bỏ qua item lỗi."""
@@ -126,7 +102,7 @@ class Pipeline:
         # [Bible Mode] Sync characters từ Bible vào Characters_Active
         if settings.bible_mode and settings.bible_available:
             try:
-                from littrans.bible.pipeline_bible_patch import init_characters_from_bible
+                from littrans.context.pipeline_bible_patch import init_characters_from_bible
                 init_characters_from_bible()
             except Exception as _e:
                 logging.warning(f"[Pipeline] Bible init lỗi: {_e}")
@@ -275,7 +251,7 @@ class Pipeline:
 
         # ── Step 1: Pre-call ──────────────────────────────────────
         print(f"  🔍 Pre-call...")
-        from littrans.engine.pre_processor import run as pre_run
+        from littrans.core.pre_processor import run as pre_run
         chapter_map = pre_run(text, name_lock, char_profiles, known_skills)
         if chapter_map.ok:
             print(f"  ✅ Chapter map: {len(chapter_map.active_names)} tên · "
@@ -289,7 +265,7 @@ class Pipeline:
 
         # ── Step 2: Build system prompt ───────────────────────────
         if settings.bible_mode and settings.bible_available:
-            from littrans.bible.pipeline_bible_patch import build_bible_system_prompt
+            from littrans.context.pipeline_bible_patch import build_bible_system_prompt
             system_prompt = build_bible_system_prompt(
                 instructions = self._instructions,
                 text         = text,
@@ -311,6 +287,7 @@ class Pipeline:
                 budget_limit    = settings.budget_limit,
                 chapter_text    = text,
             )
+
         # ── Token estimate warning ────────────────────────────────
         if settings.budget_limit > 0:
             from littrans.llm.token_budget import estimate_tokens
@@ -370,7 +347,7 @@ class Pipeline:
         time.sleep(settings.post_call_sleep)
 
         # ── Step 4: Post-call + retry loop ────────────────────────
-        from littrans.engine.post_analyzer import run as post_run, PostResult
+        from littrans.core.post_analyzer import run as post_run, PostResult
 
         post_result = PostResult(
             final_translation = translation,
@@ -435,7 +412,7 @@ class Pipeline:
         # ── [Bible Mode] Update MainLore từ post metadata ─────────
         if settings.bible_mode and settings.bible_available and post_result.ok:
             try:
-                from littrans.bible.pipeline_bible_patch import update_bible_from_post
+                from littrans.context.pipeline_bible_patch import update_bible_from_post
                 update_bible_from_post(post_result, filename, text)
             except Exception as _e:
                 logging.warning(f"[Pipeline] Bible update lỗi {filename}: {_e}")
@@ -459,21 +436,18 @@ class Pipeline:
         char_profiles : dict,
     ) -> None:
         """Update Master State từ metadata của Post-call."""
-        # ── Thuật ngữ mới ─────────────────────────────────────────
         term_objects = _parse_list(post_result.new_terms, TermDetail, "TermDetail")
         if term_objects:
             n = add_new_terms(term_objects, filename)
             if n:
                 print(f"  📝 Thuật ngữ mới: {n}")
 
-        # ── Kỹ năng mới / tiến hóa ───────────────────────────────
         skill_objects = _parse_list(post_result.skill_updates, SkillUpdate, "SkillUpdate")
         if skill_objects:
             n = add_skill_updates(skill_objects, filename)
             if n:
                 print(f"  ⚔️  Kỹ năng mới: {n}")
 
-        # ── Nhân vật & quan hệ ───────────────────────────────────
         char_objects = _parse_characters(post_result.new_characters)
         rel_objects  = _parse_relationships(post_result.relationship_updates, filename)
 
@@ -533,19 +507,19 @@ class Pipeline:
             n = count_pending_terms()
             if settings.auto_merge_glossary:
                 print(f"\n📚 Auto-merge ~{n} thuật ngữ...")
-                from littrans.tools.clean_glossary import clean_glossary
+                from littrans.cli.tool_clean import clean_glossary
                 clean_glossary()
             else:
-                print(f"\n💡 Có ~{n} thuật ngữ mới. Chạy: python main.py clean glossary")
+                print(f"\n💡 Có ~{n} thuật ngữ mới. Chạy: python scripts/main.py clean glossary")
 
         n_staging = has_staging_chars()
         if n_staging:
             if settings.auto_merge_characters:
                 print(f"\n👤 Auto-merge {n_staging} nhân vật...")
-                from littrans.tools.clean_characters import run_action
+                from littrans.cli.tool_clean import run_action
                 run_action("merge")
             else:
-                print(f"\n💡 Có {n_staging} nhân vật mới. Chạy: python main.py clean characters --action merge")
+                print(f"\n💡 Có {n_staging} nhân vật mới. Chạy: python scripts/main.py clean characters --action merge")
 
     def _wait(self, exc: Exception, attempt: int) -> None:
         if is_rate_limit(exc):
@@ -588,14 +562,13 @@ class Pipeline:
             "tắt" if settings.budget_limit == 0
             else f"{settings.budget_limit:,} token"
         )
-        mode_str = "3-call (pre+trans+post)"
         print(f"\n{'═'*62}")
         trans_info  = translation_model_info()
         gemini_info = settings.gemini_model
         print(f"  Pipeline Dịch Truyện v5.3 — Trans: {trans_info}")
         print(f"  Scout/Pre/Post             — Gemini: {gemini_info}")
         print(f"{'─'*62}")
-        print(f"  Mode             : {mode_str}")
+        print(f"  Mode             : 3-call (pre+trans+post)")
         print(f"  Tổng chương      : {len(all_files)}")
         print(f"  Cần dịch         : {len(pending)}")
         print(f"  Nhân vật Active  : {stats['active']}"
