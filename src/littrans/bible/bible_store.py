@@ -3,19 +3,19 @@ src/littrans/bible/bible_store.py — BibleStore: đọc/ghi 3 tầng Bible.
 
 Structure trên disk:
   data/bible/
-    meta.json                  ← BibleMeta
+    meta.json
     database/
-      characters.json          ← {entities: [BibleCharacter, ...]}
+      characters.json
       items.json
       locations.json
       skills.json
       factions.json
       concepts.json
-      index.json               ← {name_lower: IndexEntry}
-    worldbuilding.json         ← BibleWorldBuilding
-    main_lore.json             ← BibleMainLore
+      index.json
+    worldbuilding.json
+    main_lore.json
     staging/
-      stage_chapter_001.json   ← ScanOutput
+      stage_chapter_001.json
 
 Thread-safe:
   - _db_lock  : Database (r/w)
@@ -25,9 +25,14 @@ Thread-safe:
   - Staging: tên file unique per chapter → không cần lock
 
 [v1.0] Initial implementation — Bible System Sprint 1
+[v1.1 FIX] In-memory cache cho database files và index.
+           Cache được validate bằng mtime — tự động reload khi file thay đổi
+           (kể cả khi user edit thủ công bằng text editor).
+           Aho-Corasick cho get_entities_for_chapter — O(N) thay vì O(N×M) regex.
 """
 from __future__ import annotations
 
+import os
 import re
 import json
 import logging
@@ -44,6 +49,18 @@ from littrans.bible.schemas import (
     ConsistencyReport,
 )
 from littrans.utils.io_utils import load_json, save_json, atomic_write
+
+# ── Aho-Corasick (optional) ───────────────────────────────────────
+try:
+    import ahocorasick as _ahocorasick
+    _AHO_AVAILABLE = True
+except ImportError:
+    _AHO_AVAILABLE = False
+
+# Cache automaton riêng cho entity index
+_entity_automaton_cache : dict[int, Any]  = {}
+_entity_automaton_lock  = threading.Lock()
+_ENTITY_AHO_CACHE_MAX   = 3
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -68,6 +85,37 @@ def _make_id(entity_type: str, counter: int) -> str:
     return f"{prefix}_{counter:04d}"
 
 
+# ── Aho-Corasick builder ──────────────────────────────────────────
+
+def _build_entity_automaton(index: dict[str, dict]):
+    """
+    Xây Aho-Corasick automaton từ index.
+    Cache theo hash của frozenset(keys) — nếu index thay đổi thì rebuild.
+    """
+    if not _AHO_AVAILABLE:
+        return None
+
+    cache_key = hash(frozenset(index.keys()))
+
+    with _entity_automaton_lock:
+        if cache_key in _entity_automaton_cache:
+            return _entity_automaton_cache[cache_key]
+
+        A = _ahocorasick.Automaton()
+        for name_key, entry in index.items():
+            if len(name_key) >= 3:
+                A.add_word(name_key, (name_key, entry))
+        A.make_automaton()
+
+        # LRU: giữ tối đa _ENTITY_AHO_CACHE_MAX automaton
+        if len(_entity_automaton_cache) >= _ENTITY_AHO_CACHE_MAX:
+            oldest = next(iter(_entity_automaton_cache))
+            del _entity_automaton_cache[oldest]
+
+        _entity_automaton_cache[cache_key] = A
+        return A
+
+
 # ═══════════════════════════════════════════════════════════════════
 # BIBLE STORE
 # ═══════════════════════════════════════════════════════════════════
@@ -75,7 +123,8 @@ def _make_id(entity_type: str, counter: int) -> str:
 class BibleStore:
     """
     Đọc/ghi toàn bộ 3 tầng Bible. Thread-safe, atomic write.
-    
+    In-memory cache với mtime validation để tránh I/O bottleneck.
+
     Usage:
         store = BibleStore(Path("data/bible"))
         char = store.get_character("Lý Thanh Vân")
@@ -83,8 +132,8 @@ class BibleStore:
     """
 
     def __init__(self, bible_dir: Path) -> None:
-        self._dir        = bible_dir
-        self._db_dir     = bible_dir / "database"
+        self._dir         = bible_dir
+        self._db_dir      = bible_dir / "database"
         self._staging_dir = bible_dir / "staging"
 
         # Locks per tầng
@@ -94,12 +143,39 @@ class BibleStore:
         self._meta_lock  = threading.Lock()
         self._idx_lock   = threading.Lock()
 
+        # ── In-memory cache ───────────────────────────────────────
+        # Format: {entity_type: (data: list[dict], mtime: float)}
+        # mtime dùng để detect thay đổi file (kể cả manual edit)
+        self._db_cache   : dict[str, tuple[list[dict], float]] = {}
+        # Format: (data: dict, mtime: float) | None
+        self._index_cache: tuple[dict, float] | None           = None
+
         # Ensure directories
         self._db_dir.mkdir(parents=True, exist_ok=True)
         self._staging_dir.mkdir(parents=True, exist_ok=True)
 
-        # ID counters — loaded from meta
         self._counters: dict[str, int] = {}
+
+    # ── Cache helpers ──────────────────────────────────────────────
+
+    def _get_file_mtime(self, path: Path) -> float:
+        """Trả về mtime của file, 0.0 nếu không tồn tại."""
+        try:
+            return os.path.getmtime(str(path))
+        except OSError:
+            return 0.0
+
+    def invalidate_cache(self, entity_type: str | None = None) -> None:
+        """
+        Force reload từ disk lần sau.
+        entity_type=None → xóa toàn bộ cache.
+        Dùng sau khi import external data hoặc manual edit file JSON.
+        """
+        if entity_type:
+            self._db_cache.pop(entity_type, None)
+        else:
+            self._db_cache.clear()
+            self._index_cache = None
 
     # ──────────────────────────────────────────────────────────────
     # META
@@ -126,7 +202,7 @@ class BibleStore:
         self.save_meta(meta)
 
     def get_scan_progress(self) -> dict[str, Any]:
-        meta = self.load_meta()
+        meta  = self.load_meta()
         total = meta.total_chapters or 1
         return {
             "total"       : meta.total_chapters,
@@ -138,10 +214,7 @@ class BibleStore:
         }
 
     def is_chapter_scanned(self, chapter: str) -> bool:
-        """Kiểm tra nhanh qua staging + meta — không load toàn bộ DB."""
-        # Staging file sẽ bị xóa sau consolidation
-        # → kiểm tra qua main_lore chapter_summaries
-        lore = self._load_main_lore()
+        lore    = self._load_main_lore()
         scanned = {s.chapter for s in lore.chapter_summaries}
         return chapter in scanned
 
@@ -161,9 +234,9 @@ class BibleStore:
             t = entry.get("type", "unknown")
             type_counts[t] = type_counts.get(t, 0) + 1
         return {
-            "meta"       : meta.model_dump(),
-            "by_type"    : type_counts,
-            "staging"    : len(list(self._staging_dir.glob("*.json"))),
+            "meta"         : meta.model_dump(),
+            "by_type"      : type_counts,
+            "staging"      : len(list(self._staging_dir.glob("*.json"))),
             "lore_chapters": len(self._load_main_lore().chapter_summaries),
         }
 
@@ -175,22 +248,39 @@ class BibleStore:
         return self._db_dir / "index.json"
 
     def _load_index(self) -> dict[str, dict]:
-        raw = load_json(self._index_path())
-        return raw if isinstance(raw, dict) else {}
+        """
+        [v1.1] Load index với mtime cache.
+        Tự động reload khi file thay đổi (kể cả manual edit).
+        """
+        path  = self._index_path()
+        mtime = self._get_file_mtime(path)
+
+        if self._index_cache is not None:
+            cached_data, cached_mtime = self._index_cache
+            if mtime <= cached_mtime:
+                return cached_data
+
+        # Cache miss hoặc file đã thay đổi → reload từ disk
+        raw  = load_json(path)
+        data = raw if isinstance(raw, dict) else {}
+        self._index_cache = (data, mtime)
+        return data
 
     def _save_index(self, index: dict[str, dict]) -> None:
-        save_json(self._index_path(), index)
+        """Ghi index và cập nhật cache với mtime mới."""
+        path = self._index_path()
+        save_json(path, index)
+        mtime = self._get_file_mtime(path)
+        self._index_cache = (index, mtime)
 
     def _index_add(self, entity_id: str, entity_type: str,
                    canonical_name: str, en_name: str) -> None:
-        """Thêm entry vào index — gọi sau khi upsert entity."""
         with self._idx_lock:
             index = self._load_index()
             key = (canonical_name or en_name).lower().strip()
             if key:
                 index[key] = {"id": entity_id, "type": entity_type,
                                "name": canonical_name, "en": en_name}
-            # Thêm cả en_name làm key nếu khác
             en_key = en_name.lower().strip()
             if en_key and en_key != key:
                 index[en_key] = {"id": entity_id, "type": entity_type,
@@ -198,12 +288,10 @@ class BibleStore:
             self._save_index(index)
 
     def _index_lookup(self, name: str) -> dict | None:
-        """Tìm entity trong index theo name. Trả về {id, type, name, en} hoặc None."""
         index = self._load_index()
         key   = name.lower().strip()
         if key in index:
             return index[key]
-        # Fuzzy: partial match
         for k, v in index.items():
             if key in k or k in key:
                 if len(key) >= 3 and abs(len(key) - len(k)) <= 4:
@@ -219,19 +307,38 @@ class BibleStore:
         return self._db_dir / f"{plural}.json"
 
     def _load_db_file(self, entity_type: str) -> list[dict]:
-        raw = load_json(self._db_path(entity_type))
-        if not raw:
-            return []
-        return raw.get("entities", []) if isinstance(raw, dict) else []
+        """
+        [v1.1] Load database file với mtime cache.
+        - Cache hit: trả về data trong RAM nếu file chưa thay đổi trên disk.
+        - Cache miss: reload từ disk và cập nhật cache.
+        Đảm bảo detect khi user edit file JSON thủ công bằng text editor.
+        """
+        path  = self._db_path(entity_type)
+        mtime = self._get_file_mtime(path)
+
+        if entity_type in self._db_cache:
+            cached_data, cached_mtime = self._db_cache[entity_type]
+            if mtime <= cached_mtime:
+                return cached_data
+
+        # Cache miss hoặc file đã thay đổi → reload từ disk
+        raw  = load_json(path)
+        data = raw.get("entities", []) if isinstance(raw, dict) else []
+        self._db_cache[entity_type] = (data, mtime)
+        return data
 
     def _save_db_file(self, entity_type: str, entities: list[dict]) -> None:
-        save_json(self._db_path(entity_type), {"entities": entities})
+        """Ghi db file và cập nhật cache với mtime mới sau khi ghi."""
+        path = self._db_path(entity_type)
+        save_json(path, {"entities": entities})
+        # Cập nhật cache với mtime mới (quan trọng: đọc sau khi ghi)
+        mtime = self._get_file_mtime(path)
+        self._db_cache[entity_type] = (entities, mtime)
 
     def _next_id(self, entity_type: str) -> str:
         with self._db_lock:
-            entities = self._load_db_file(entity_type)
-            counter  = len(entities) + 1
-            # Ensure unique
+            entities     = self._load_db_file(entity_type)
+            counter      = len(entities) + 1
             existing_ids = {e.get("id", "") for e in entities}
             candidate    = _make_id(entity_type, counter)
             while candidate in existing_ids:
@@ -240,7 +347,6 @@ class BibleStore:
             return candidate
 
     def get_entity(self, name: str, entity_type: str | None = None) -> dict | None:
-        """Tìm entity theo tên (exact + fuzzy). entity_type=None → tìm khắp nơi."""
         entry = self._index_lookup(name)
         if not entry:
             return None
@@ -255,8 +361,6 @@ class BibleStore:
         return None
 
     def get_entity_by_id(self, entity_id: str) -> dict | None:
-        """Tìm entity theo ID chính xác."""
-        # Xác định type từ prefix
         for prefix, t in [
             ("char", "character"), ("item", "item"), ("loc", "location"),
             ("skl", "skill"), ("fac", "faction"), ("con", "concept"),
@@ -272,21 +376,15 @@ class BibleStore:
         """
         Insert hoặc update entity.
         Trả về entity_id đã dùng.
-        
-        Logic:
-          1. Nếu có id trong data → update
-          2. Nếu không → tìm qua index (tên)
-          3. Nếu không tìm được → insert mới
         """
         if entity_type not in ENTITY_MODELS:
             raise ValueError(f"entity_type không hợp lệ: {entity_type}")
 
         with self._db_lock:
-            entities = self._load_db_file(entity_type)
+            entities  = self._load_db_file(entity_type)
             entity_id = data.get("id", "")
 
             if not entity_id:
-                # Tìm theo tên
                 existing = self._index_lookup(
                     data.get("canonical_name", "") or data.get("en_name", "")
                 )
@@ -297,7 +395,6 @@ class BibleStore:
             data["last_updated"] = now
 
             if entity_id:
-                # Update
                 for i, e in enumerate(entities):
                     if e.get("id") == entity_id:
                         merged = self._merge_entity(e, data)
@@ -310,16 +407,14 @@ class BibleStore:
                             merged.get("en_name", ""),
                         )
                         return entity_id
-                # ID không tìm thấy trong file → insert với ID đó
                 data["id"] = entity_id
             else:
-                # Insert mới
-                entity_id = _make_id(entity_type, len(entities) + 1)
+                entity_id    = _make_id(entity_type, len(entities) + 1)
                 existing_ids = {e.get("id") for e in entities}
-                n = len(entities) + 1
+                n            = len(entities) + 1
                 while entity_id in existing_ids:
-                    n += 1
-                    entity_id = _make_id(entity_type, n)
+                    n         += 1
+                    entity_id  = _make_id(entity_type, n)
                 data["id"] = entity_id
                 data.setdefault("type", entity_type)
 
@@ -331,25 +426,16 @@ class BibleStore:
                 data.get("en_name", ""),
             )
 
-            # Update meta counts
-            meta = self.load_meta()
+            meta   = self.load_meta()
             counts = meta.entity_counts
             counts[entity_type] = len(entities)
-            meta.entity_counts = counts
-            meta.last_updated  = now
+            meta.entity_counts  = counts
+            meta.last_updated   = now
             self.save_meta(meta)
 
             return entity_id
 
     def _merge_entity(self, existing: dict, new_data: dict) -> dict:
-        """
-        Merge new_data vào existing entity.
-        Quy tắc:
-          - Trường rỗng trong existing → dùng new_data
-          - List → union, không trùng lặp
-          - Số: max (level, count)
-          - Trường khác → new_data ghi đè nếu không rỗng
-        """
         merged = dict(existing)
 
         LIST_FIELDS = ("aliases", "skill_ids", "member_ids", "effects",
@@ -364,7 +450,6 @@ class BibleStore:
             old_val = merged.get(key)
 
             if isinstance(new_val, list) and key in LIST_FIELDS:
-                # Union list — tránh trùng
                 old_list = old_val if isinstance(old_val, list) else []
                 for item in new_val:
                     if item and item not in old_list:
@@ -372,12 +457,10 @@ class BibleStore:
                 merged[key] = old_list
 
             elif isinstance(new_val, str):
-                # Ghi đè nếu new không rỗng
                 if new_val.strip():
                     merged[key] = new_val
 
             elif isinstance(new_val, dict) and isinstance(old_val, dict):
-                # Merge dict đệ quy 1 cấp
                 merged[key] = {**old_val, **{k: v for k, v in new_val.items() if v}}
 
             elif isinstance(new_val, int) and key == "chapter_count":
@@ -406,25 +489,41 @@ class BibleStore:
     def get_entities_for_chapter(self, chapter_text: str) -> dict[str, list[dict]]:
         """
         Trả về {type: [entities]} cho các entity XUẤT HIỆN trong chapter_text.
-        Dùng index để detect nhanh thay vì regex từng entity.
+
+        [v1.1] Dùng Aho-Corasick (O(N) single pass) khi có pyahocorasick.
+               Fallback về regex khi chưa cài.
         """
         text_lower = chapter_text.lower()
         index      = self._load_index()
-        matched_ids: dict[str, set] = {}   # {type: {ids}}
+        matched_ids: dict[str, set] = {}
 
-        for name_key, entry in index.items():
-            if len(name_key) < 3:
-                continue
-            # Word-boundary check — Unicode-aware, nhất quán với name_lock.py
-            pattern = rf"(?<![^\W_]){re.escape(name_key)}(?![^\W_])"
-            try:
-                if re.search(pattern, text_lower, re.IGNORECASE | re.UNICODE):
+        automaton = _build_entity_automaton(index)
+
+        if automaton is not None:
+            # ── Fast path: Aho-Corasick ───────────────────────────
+            for end_idx, (name_key, entry) in automaton.iter(text_lower):
+                if len(name_key) < 3:
+                    continue
+                start  = end_idx - len(name_key) + 1
+                before = text_lower[start - 1] if start > 0 else " "
+                after  = text_lower[end_idx + 1] if end_idx + 1 < len(text_lower) else " "
+                if not before.isalnum() and not after.isalnum():
                     t = entry["type"]
                     matched_ids.setdefault(t, set()).add(entry["id"])
-            except re.error:
-                if name_key in text_lower:
-                    t = entry["type"]
-                    matched_ids.setdefault(t, set()).add(entry["id"])
+        else:
+            # ── Fallback: regex ───────────────────────────────────
+            for name_key, entry in index.items():
+                if len(name_key) < 3:
+                    continue
+                pattern = rf"(?<![^\W_]){re.escape(name_key)}(?![^\W_])"
+                try:
+                    if re.search(pattern, text_lower, re.IGNORECASE | re.UNICODE):
+                        t = entry["type"]
+                        matched_ids.setdefault(t, set()).add(entry["id"])
+                except re.error:
+                    if name_key in text_lower:
+                        t = entry["type"]
+                        matched_ids.setdefault(t, set()).add(entry["id"])
 
         result: dict[str, list[dict]] = {}
         for entity_type, ids in matched_ids.items():
@@ -435,10 +534,7 @@ class BibleStore:
         return result
 
     def search_entities(self, query: str, entity_type: str | None = None) -> list[dict]:
-        """Full-text search trong index + data.
-
-        [FIX] Gom IDs theo type để mỗi file JSON chỉ được mở và parse đúng 1 lần.
-        """
+        """Full-text search trong index + data."""
         query_lower = query.lower().strip()
         index       = self._load_index()
 
@@ -477,10 +573,6 @@ class BibleStore:
             return self._load_worldbuilding()
 
     def update_worldbuilding(self, updates: dict[str, Any]) -> None:
-        """
-        Merge updates vào WorldBuilding.
-        List fields → append (không trùng), string fields → ghi đè nếu không rỗng.
-        """
         with self._wb_lock:
             wb  = self._load_worldbuilding()
             raw = wb.model_dump()
@@ -492,7 +584,6 @@ class BibleStore:
                     existing = raw.get(key, [])
                     if not isinstance(existing, list):
                         existing = []
-                    # Serialize — _ser() handle Pydantic objects (json.dumps không tự biết)
                     _ser = lambda o: o.model_dump() if hasattr(o, "model_dump") else o
                     existing_strs = {json.dumps(_ser(e), ensure_ascii=False, sort_keys=True)
                                      for e in existing}
@@ -512,21 +603,15 @@ class BibleStore:
             atomic_write(self._wb_path(), new_wb.model_dump_json(indent=2))
 
     def get_relevant_worldbuilding(self, chapter_text: str) -> str:
-        """
-        Trả về block text worldbuilding liên quan đến chapter_text.
-        Dùng trong Bible-aware prompt builder.
-        """
         wb    = self.get_worldbuilding()
         lines = []
 
-        # Cultivation systems có tên xuất hiện trong text
         for cs in wb.cultivation_systems:
             if cs.name and cs.name.lower() in chapter_text.lower():
                 lines.append(f"**Hệ thống tu luyện: {cs.name}**")
                 for realm in cs.realms[:6]:
                     lines.append(f"  {realm.order}. {realm.name_vn} ({realm.name_en})")
 
-        # Rules
         relevant_rules = [
             r.description for r in wb.confirmed_rules
             if any(word in chapter_text.lower()
@@ -555,7 +640,6 @@ class BibleStore:
     def append_chapter_summary(self, summary: BibleChapterSummary) -> None:
         with self._lore_lock:
             lore = self._load_main_lore()
-            # Không append trùng
             existing_chapters = {s.chapter for s in lore.chapter_summaries}
             if summary.chapter not in existing_chapters:
                 lore.chapter_summaries.append(summary)
@@ -578,10 +662,8 @@ class BibleStore:
             lore.thread_counter += 1
             if not thread.id:
                 thread.id = _make_id("thread", lore.thread_counter)
-            # Check existing thread với tên tương tự
             for t in lore.plot_threads:
                 if t.name.lower() == thread.name.lower():
-                    # Update status nếu đóng
                     if thread.status in ("closed", "abandoned") and t.status == "open":
                         t.status          = thread.status
                         t.closed_chapter  = thread.closed_chapter
@@ -619,7 +701,6 @@ class BibleStore:
             return revelation.id
 
     def get_recent_lore(self, n: int = 3) -> list[BibleChapterSummary]:
-        """Trả về N chapter summaries gần nhất."""
         lore = self._load_main_lore()
         return lore.chapter_summaries[-n:] if lore.chapter_summaries else []
 
@@ -631,7 +712,6 @@ class BibleStore:
         return threads
 
     def get_active_foreshadows(self, current_chapter: str) -> list[str]:
-        """Trả về hints về các plot thread đang mở — inject vào prompt."""
         threads = self.get_plot_threads("open")
         if not threads:
             return []
@@ -641,7 +721,6 @@ class BibleStore:
         return hints
 
     def format_recent_lore_for_prompt(self, n: int = 3) -> str:
-        """Format N chapter summaries gần nhất để inject vào Trans-call prompt."""
         recent = self.get_recent_lore(n)
         if not recent:
             return ""
@@ -662,7 +741,6 @@ class BibleStore:
         return self._staging_dir / f"stage_{safe}.json"
 
     def save_staging(self, chapter: str, scan_output: ScanOutput) -> None:
-        """Lưu raw scan output vào staging/."""
         path = self._staging_path(chapter)
         atomic_write(path, scan_output.model_dump_json(indent=2))
 
@@ -674,7 +752,6 @@ class BibleStore:
         return ScanOutput.model_validate(raw) if raw else None
 
     def load_all_staging(self) -> list[ScanOutput]:
-        """Load tất cả staging files, sắp xếp theo chapter_index."""
         outputs = []
         for p in sorted(self._staging_dir.glob("stage_*.json")):
             raw = load_json(p)
@@ -687,11 +764,6 @@ class BibleStore:
         return outputs
 
     def clear_staging(self, chapters: list[str] | None = None) -> int:
-        """
-        Xóa staging files sau khi consolidation.
-        chapters=None → xóa tất cả.
-        Trả về số file đã xóa.
-        """
         count = 0
         if chapters:
             for ch in chapters:
@@ -716,7 +788,6 @@ class BibleStore:
     # ──────────────────────────────────────────────────────────────
 
     def export_all_json(self, output_path: Path) -> None:
-        """Export toàn bộ Bible sang 1 JSON file."""
         db: dict[str, list] = {}
         for t in ("character", "item", "location", "skill", "faction", "concept"):
             db[t + "s"] = self.get_all_entities(t)
@@ -730,15 +801,10 @@ class BibleStore:
         atomic_write(output_path, json.dumps(blob, ensure_ascii=False, indent=2))
 
     def rebuild_index(self) -> int:
-        """
-        Rebuild toàn bộ search index từ các database files.
-        Gọi sau khi import/migrate hoặc khi index corrupt.
-        Trả về số entries trong index.
-        """
         new_index: dict[str, dict] = {}
         for t in ("character", "item", "location", "skill", "faction", "concept"):
             for e in self._load_db_file(t):
-                eid  = e.get("id", "")
+                eid   = e.get("id", "")
                 cname = e.get("canonical_name", "")
                 ename = e.get("en_name", "")
                 if not eid:

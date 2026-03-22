@@ -311,6 +311,18 @@ class Pipeline:
                 budget_limit    = settings.budget_limit,
                 chapter_text    = text,
             )
+        # ── Token estimate warning ────────────────────────────────
+        if settings.budget_limit > 0:
+            from littrans.llm.token_budget import estimate_tokens
+            est_prompt  = estimate_tokens(system_prompt)
+            est_chapter = estimate_tokens(text, "en")
+            est_total   = est_prompt + est_chapter
+            pct         = est_total / settings.budget_limit * 100
+            if pct > 90:
+                print(f"  ⚠️  Token estimate: ~{est_total:,} / {settings.budget_limit:,} "
+                      f"({pct:.0f}%) — RẤT SÁT LIMIT, có thể bị cắt!")
+            elif pct > 70:
+                print(f"  📊 Token estimate: ~{est_total:,} ({pct:.0f}% budget)")
 
         # ── Step 3: Translation call + retry loop ─────────────────
         translation       = ""

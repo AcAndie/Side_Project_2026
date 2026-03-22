@@ -8,9 +8,13 @@ src/littrans/managers/glossary.py — Glossary phân category + Aho-Corasick fil
 [v4 FIX] Aho-Corasick cache key bao gồm max_mtime → tự invalidate khi file thay đổi.
 [v4.3 FIX] Không làm tròn mtime — tránh cache stale khi file được ghi trong cùng 1 giây.
 [v4.4] Thêm existing_terms_set() public — dùng bởi Scout Glossary Suggest.
+[v4.5 FIX] _append_staging dùng atomic_write thay vì open("a") → tránh corrupt file khi crash.
+[v4.5 FIX] _get_automaton dùng content hash (size + mtime_ns) thay vì mtime float
+           → đáng tin hơn trên Docker/Windows mount và filesystem độ phân giải thấp.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import threading
@@ -100,25 +104,36 @@ def _add(d: dict, cat: str, line: str) -> None:
         d[cat].append(line)
 
 
-# ── Aho-Corasick cache với mtime invalidation ─────────────────────
+# ── Content hash cho cache invalidation ──────────────────────────
 
-def _get_mtime() -> float:
+def _get_content_hash() -> str:
+    """
+    Hash dựa trên (file_size + mtime_ns) của tất cả glossary files.
+    Nhanh hơn đọc toàn bộ nội dung, nhưng đáng tin hơn mtime float đơn thuần.
+    Chỉ khi cả size lẫn mtime_ns đều không đổi thì mới có thể false-positive,
+    xác suất gần như bằng 0 trong thực tế.
+    """
     all_paths = list(settings.glossary_files.values()) + [settings.staging_terms_file]
-    mtimes    = []
-    for p in all_paths:
+    hasher    = hashlib.md5()
+    for p in sorted(all_paths, key=str):
         try:
-            mtimes.append(os.path.getmtime(str(p)))
+            if p.exists():
+                stat = p.stat()
+                hasher.update(
+                    f"{p.name}:{stat.st_size}:{stat.st_mtime_ns}".encode()
+                )
+            else:
+                hasher.update(f"{p.name}:missing".encode())
         except OSError:
-            pass
-    return max(mtimes) if mtimes else 0.0
+            hasher.update(f"{p.name}:error".encode())
+    return hasher.hexdigest()
 
 
 def _get_automaton(flat: dict):
-    # [FIX] Dùng mtime chính xác (float), KHÔNG làm tròn.
-    # Làm tròn gây cache stale khi clean_glossary ghi file và pipeline chạy tiếp
-    # trong cùng 1 giây (mtime chênh < 0.5s → round() trả về cùng giá trị).
-    mtime_exact = _get_mtime()
-    cache_key   = hash((frozenset(flat.keys()), mtime_exact))
+    # [FIX v4.5] Dùng content hash thay vì mtime float.
+    # mtime float không đáng tin trên Docker volume, Windows mount, hoặc
+    # khi file được ghi và đọc trong cùng một phần nhỏ của giây.
+    cache_key = hash((frozenset(flat.keys()), _get_content_hash()))
 
     with _aho_lock:
         if cache_key in _aho_cache:
@@ -204,12 +219,16 @@ def _append_to_file(path, lines: list[str]) -> None:
 
 
 def _append_staging(lines: list[str], source: str) -> None:
+    """
+    [FIX v4.5] Dùng atomic_write thay vì open("a").
+    Tránh corrupt file nếu process bị kill giữa chừng.
+    Pattern: đọc toàn bộ → nối chuỗi → ghi nguyên tử.
+    """
     existing = load_text(settings.staging_terms_file)
-    with open(settings.staging_terms_file, "a", encoding="utf-8") as f:
-        if not existing.strip():
-            f.write("# Staging Terms\n\n")
-        f.write(f"\n## Từ chương: {source}\n")
-        f.writelines(l + "\n" for l in lines)
+    block    = f"\n## Từ chương: {source}\n" + "".join(l + "\n" for l in lines)
+    if not existing.strip():
+        block = "# Staging Terms\n\n" + block
+    atomic_write(settings.staging_terms_file, existing + block)
 
 
 # ── Stats ────────────────────────────────────────────────────────

@@ -17,6 +17,9 @@ Tái dụng:
   _existing_terms_set()    — pattern từ clean_glossary.py
 
 [v1.0] Initial implementation — Bible System Sprint 2
+[v1.1 FIX] Dùng FileLock (cross-process) để tránh race condition khi UI + CLI chạy song song.
+           run() → _run_locked() bên trong với lock timeout=30s.
+           Selective staging cleanup: chỉ xóa chapter KHÔNG có lỗi.
 """
 from __future__ import annotations
 
@@ -24,6 +27,8 @@ import re
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+
+from filelock import FileLock, Timeout
 
 from littrans.bible.bible_store import BibleStore
 from littrans.bible.schemas import (
@@ -111,7 +116,7 @@ def _name_similarity(candidate: ScanCandidate, existing: dict) -> float:
 class EntityResolver:
     """
     Phán đoán: candidate là entity đã có hay entity mới?
-    
+
     Confidence thresholds:
       >= 0.95 → DUPLICATE (merge, no LLM)
       0.70–0.94 → UNCERTAIN (cần LLM arbitration)
@@ -144,14 +149,17 @@ class EntityResolver:
         if found:
             etype = found.get("type", "")
             if etype == candidate.entity_type:
-                # Lấy entity để tính similarity chính xác hơn
                 entity = self._store.get_entity_by_id(found["id"])
                 if entity:
                     sim = _name_similarity(candidate, entity)
                     if sim >= self.THRESH_SURE:
                         return found["id"], sim
                     elif sim >= self.THRESH_MAYBE:
-                        return found["id"], sim   # cần LLM arbitration
+                        logging.warning(
+                            f"[EntityResolver] Uncertain merge '{candidate.en_name}' → "
+                            f"{found['id']} (confidence: {sim:.2f}) — cần verify"
+                        )
+                        return found["id"], sim
 
         # 3. Fuzzy search
         results = self._store.search_entities(
@@ -161,8 +169,16 @@ class EntityResolver:
         for entity in results[:3]:
             sim = _name_similarity(candidate, entity)
             if sim >= self.THRESH_SURE:
+                logging.info(
+                    f"[EntityResolver] Fuzzy merge '{candidate.en_name}' → "
+                    f"{entity.get('id', '?')} (confidence: {sim:.2f})"
+                )
                 return entity["id"], sim
             elif sim >= self.THRESH_MAYBE:
+                logging.warning(
+                    f"[EntityResolver] Uncertain fuzzy merge '{candidate.en_name}' → "
+                    f"{entity.get('id', '?')} (confidence: {sim:.2f}) — cần verify"
+                )
                 return entity["id"], sim
 
         return "", 0.0   # NEW
@@ -175,10 +191,12 @@ class EntityResolver:
 class BibleConsolidator:
     """
     Hợp nhất staging → 3 tầng chính của BibleStore.
-    
+
     Usage:
         consolidator = BibleConsolidator(store)
         result = consolidator.run(staging_outputs)
+
+    [v1.1] Dùng FileLock để tránh race condition khi nhiều process cùng consolidate.
     """
 
     def __init__(self, store: BibleStore) -> None:
@@ -186,9 +204,23 @@ class BibleConsolidator:
         self._resolver = EntityResolver(store)
 
     def run(self, staging: list[ScanOutput]) -> ConsolidationResult:
-        """Entry point — consolidate list ScanOutput → 3 tầng."""
-        result = ConsolidationResult()
+        """
+        Entry point — consolidate list ScanOutput → 3 tầng.
+        Dùng cross-process FileLock để đảm bảo chỉ có 1 consolidation chạy tại 1 thời điểm.
+        """
+        lock_path = self._store._dir / ".consolidate.lock"
+        try:
+            with FileLock(str(lock_path), timeout=30):
+                return self._run_locked(staging)
+        except Timeout:
+            msg = "Không thể lấy consolidation lock sau 30s — có process khác đang chạy?"
+            logging.error(f"[Consolidator] {msg}")
+            print(f"  ⚠️  {msg}")
+            return ConsolidationResult(errors=[msg])
 
+    def _run_locked(self, staging: list[ScanOutput]) -> ConsolidationResult:
+        """Chạy consolidation bên trong FileLock."""
+        result = ConsolidationResult()
         for scan_output in staging:
             try:
                 self._consolidate_one(scan_output, result)
@@ -197,7 +229,6 @@ class BibleConsolidator:
                 msg = f"{scan_output.source_chapter}: {e}"
                 logging.error(f"[Consolidator] {msg}")
                 result.errors.append(msg)
-
         return result
 
     def _consolidate_one(self, scan: ScanOutput, result: ConsolidationResult) -> None:
@@ -242,7 +273,7 @@ class BibleConsolidator:
         Returns: (entity_id, action) where action = "added"|"updated"|"skipped"
         """
         existing_id, confidence = self._resolver.resolve(candidate)
-        
+
         # Cần LLM arbitration?
         if (existing_id and
                 EntityResolver.THRESH_MAYBE <= confidence < EntityResolver.THRESH_SURE):
@@ -278,7 +309,7 @@ class BibleConsolidator:
                 "status"              : raw.get("status", "alive"),
                 "role"                : raw.get("role", "Unknown"),
                 "archetype"           : raw.get("archetype", "UNKNOWN"),
-                "faction_id"          : "",   # sẽ resolve sau
+                "faction_id"          : "",
                 "cultivation"         : {"realm": raw.get("cultivation_realm", "")},
                 "personality_summary" : raw.get("personality_summary", ""),
                 "pronoun_self"        : raw.get("pronoun_self", ""),
@@ -360,14 +391,13 @@ class BibleConsolidator:
         except Exception as e:
             logging.warning(f"[Consolidator] WorldBuilding update lỗi: {e}")
 
-
     # ── Tầng 3: Main Lore ─────────────────────────────────────────
 
     def _consolidate_lore(self, scan: ScanOutput, result: ConsolidationResult) -> None:
         """Append lore_entry vào MainLore tầng 3."""
         lore = scan.lore_entry
         if not lore.chapter_summary:
-            return   # không có lore → bỏ qua
+            return
 
         # Chapter summary
         summary = BibleChapterSummary(
@@ -375,7 +405,7 @@ class BibleConsolidator:
             chapter_index = scan.chapter_index,
             summary       = lore.chapter_summary,
             tone          = lore.tone,
-            pov_char_id   = "",   # sẽ resolve từ pov_char name sau
+            pov_char_id   = "",
             location_id   = "",
             key_events    = [e.get("title", "") for e in lore.key_events],
             new_entity_ids= [],
