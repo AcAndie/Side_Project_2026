@@ -18,8 +18,24 @@ Tái dụng:
 """
 from __future__ import annotations
 
+import re
+
 from littrans.bible.bible_store import BibleStore
 from littrans.bible.schemas import BibleCharacter
+
+
+def _name_in_text(name: str, text_lower: str) -> bool:
+    """Kiểm tra tên có xuất hiện trong chapter text không (Unicode-aware)."""
+    if not name or len(name) < 2:
+        return False
+    try:
+        return bool(re.search(
+            rf"(?<![^\W_]){re.escape(name.lower())}(?![^\W_])",
+            text_lower,
+            re.IGNORECASE | re.UNICODE,
+        ))
+    except re.error:
+        return name.lower() in text_lower
 
 
 # ── Re-export helpers từ prompt_builder ──────────────────────────
@@ -179,8 +195,16 @@ def _fmt_bible_character_profiles(chars: list[dict], chapter_text: str) -> str:
         # Relationships từ Bible
         rels = c.get("relationships", [])
         if rels:
+            text_lower_ch = chapter_text.lower()
+            relevant      = [
+                r for r in rels
+                if _name_in_text(
+                    r.get("target_name") or r.get("target_id", ""), text_lower_ch
+                )
+            ]
+            display_rels  = relevant[:4] if relevant else rels[:2]
             block.append("\n**Quan hệ:**")
-            for rel in rels[:4]:
+            for rel in display_rels:
                 target  = rel.get("target_name") or rel.get("target_id", "?")
                 rtype   = rel.get("rel_type", "")
                 dynamic = rel.get("dynamic", "")
@@ -398,9 +422,10 @@ def _apply_bible_budget(
             for c in all_chars:
                 name = c.get("en_name", "") or c.get("canonical_name", "")
                 count = len(
-                    __import__("re").findall(
-                        rf"(?<![a-zA-Z0-9]){__import__('re').escape(name.lower())}(?![a-zA-Z0-9])",
-                        text_lower
+                    re.findall(
+                        rf"(?<![^\W_]){re.escape(name.lower())}(?![^\W_])",
+                        text_lower,
+                        re.UNICODE,
                     )
                 ) if name else 0
                 scored.append((count, c))

@@ -221,11 +221,14 @@ def _launch_bible_scan(log_queue: queue.Queue, depth: str,
         old_out = sys.stdout
 
         class _Cap(io.TextIOBase):
-            def write(self, t):
-                if t.strip():
-                    log_queue.put(t.rstrip())
+            def write(self, t: str) -> int:
+                text = t.rstrip()
+                if text:
+                    log_queue.put(text)
+                elif "\n" in t:
+                    log_queue.put("")
                 return len(t)
-            def flush(self): pass
+            def flush(self) -> None: pass
 
         sys.stdout = _Cap()
         try:
@@ -593,10 +596,14 @@ def _launch_crossref(log_queue: queue.Queue) -> None:
         old_out = sys.stdout
 
         class _Cap(io.TextIOBase):
-            def write(self, t):
-                if t.strip(): log_queue.put(t.rstrip())
+            def write(self, t: str) -> int:
+                text = t.rstrip()
+                if text:
+                    log_queue.put(text)
+                elif "\n" in t:
+                    log_queue.put("")
                 return len(t)
-            def flush(self): pass
+            def flush(self) -> None: pass
 
         sys.stdout = _Cap()
         try:

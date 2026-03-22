@@ -415,10 +415,10 @@ class BibleStore:
         for name_key, entry in index.items():
             if len(name_key) < 3:
                 continue
-            # Word-boundary check
-            pattern = rf"(?<![a-zA-Z0-9_]){re.escape(name_key)}(?![a-zA-Z0-9_])"
+            # Word-boundary check — Unicode-aware, nhất quán với name_lock.py
+            pattern = rf"(?<![^\W_]){re.escape(name_key)}(?![^\W_])"
             try:
-                if re.search(pattern, text_lower, re.IGNORECASE):
+                if re.search(pattern, text_lower, re.IGNORECASE | re.UNICODE):
                     t = entry["type"]
                     matched_ids.setdefault(t, set()).add(entry["id"])
             except re.error:
@@ -435,23 +435,29 @@ class BibleStore:
         return result
 
     def search_entities(self, query: str, entity_type: str | None = None) -> list[dict]:
-        """Full-text search trong index + data."""
+        """Full-text search trong index + data.
+
+        [FIX] Gom IDs theo type để mỗi file JSON chỉ được mở và parse đúng 1 lần.
+        """
         query_lower = query.lower().strip()
         index       = self._load_index()
-        found_ids: list[tuple[str, str]] = []  # [(type, id)]
 
+        ids_by_type: dict[str, set[str]] = {}
         for name_key, entry in index.items():
             if query_lower in name_key or name_key in query_lower:
                 t = entry["type"]
                 if entity_type and t != entity_type:
                     continue
-                found_ids.append((t, entry["id"]))
+                ids_by_type.setdefault(t, set()).add(entry["id"])
 
         results: list[dict] = []
-        for t, eid in found_ids[:50]:  # cap at 50
-            entity = self.get_entity_by_id(eid)
-            if entity:
-                results.append(entity)
+        with self._db_lock:
+            for t, ids in ids_by_type.items():
+                for entity in self._load_db_file(t):
+                    if entity.get("id") in ids:
+                        results.append(entity)
+                        if len(results) >= 50:
+                            return results
 
         return results
 
@@ -486,11 +492,12 @@ class BibleStore:
                     existing = raw.get(key, [])
                     if not isinstance(existing, list):
                         existing = []
-                    # Serialize mới để so sánh
-                    existing_strs = {json.dumps(e, ensure_ascii=False, sort_keys=True)
+                    # Serialize — _ser() handle Pydantic objects (json.dumps không tự biết)
+                    _ser = lambda o: o.model_dump() if hasattr(o, "model_dump") else o
+                    existing_strs = {json.dumps(_ser(e), ensure_ascii=False, sort_keys=True)
                                      for e in existing}
                     for item in val:
-                        item_str = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                        item_str = json.dumps(_ser(item), ensure_ascii=False, sort_keys=True)
                         if item_str not in existing_strs:
                             existing.append(item)
                             existing_strs.add(item_str)
