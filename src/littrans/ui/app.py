@@ -9,6 +9,7 @@ Khởi động:
 [v4.5.1] Fix: tách `clean_running`/`clean_logs` riêng khỏi `running`/`logs` của translate pipeline.
          Fix: remove dead `import threading`.
          Fix: clear stats/chapters cache sau khi pipeline/retranslate hoàn tất.
+[v5.3] Fix: xóa biến `three_call` đã bị remove nhưng còn sót trong slider disabled param.
 """
 from __future__ import annotations
 
@@ -154,7 +155,6 @@ def load_chapters() -> list[dict]:
             # "raw" and "vn" are loaded lazily via load_chapter_content()
         })
     return result
-
 
 
 @st.cache_data(ttl=30)
@@ -443,7 +443,7 @@ def render_translate() -> None:
                 S.logs.append("─" * 56)
                 S.logs.append("✅ Pipeline hoàn tất.")
                 load_chapters.clear()
-                load_stats.clear()   # [FIX] refresh stats sau khi pipeline xong
+                load_stats.clear()
 
         st.markdown("**Log:**")
         _show_log(S.logs)
@@ -620,7 +620,7 @@ def _render_chapter_detail(ch: dict) -> None:
                         S.rt_logs.append("─" * 56)
                         S.rt_logs.append("✅ Dịch lại hoàn tất.")
                         load_chapters.clear()
-                        load_stats.clear()    # [FIX] refresh stats sau retranslate
+                        load_stats.clear()
                 _show_log(S.rt_logs)
                 if S.rt_running:
                     time.sleep(0.9)
@@ -758,7 +758,6 @@ def render_glossary() -> None:
         label_visibility="collapsed", key="glos_q",
     )
     with c3:
-        # [FIX] dùng clean_running thay vì running — không ảnh hưởng tab Dịch
         if not S.clean_running:
             if st.button("🔄 Clean glossary", help="Phân loại Staging → đúng category"):
                 S.clean_logs = []
@@ -804,7 +803,6 @@ def render_glossary() -> None:
     else:
         st.info("Không tìm thấy thuật ngữ phù hợp.")
 
-    # ── [FIX] Show log dùng clean_running / clean_logs riêng biệt ─
     if S.clean_running or S.clean_logs:
         if S.clean_running:
             done_flag = _poll("clean_q", "clean_logs")
@@ -835,7 +833,6 @@ def render_stats() -> None:
 
     st.subheader("Thống kê pipeline")
 
-    # ── Row 1: Chương + Nhân vật ───────────────────────────────────
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Chương đã dịch", f"{done} / {total}",
               delta=f"{int(done/total*100)}%" if total else None)
@@ -850,7 +847,6 @@ def render_stats() -> None:
 
     st.divider()
 
-    # ── Row 2: Glossary + Skills ───────────────────────────────────
     glos         = s.get("glos", {})
     total_terms  = sum(v for k, v in glos.items() if k != "staging")
     staging_terms = glos.get("staging", 0)
@@ -863,16 +859,13 @@ def render_stats() -> None:
     m7.metric("Kỹ năng tổng",      s["skills"].get("total", 0))
     m8.metric("Name Lock entries", s["lock"].get("total_locked", 0))
 
-    # ── Glossary breakdown chart ───────────────────────────────────
-    chart_data = {k: v for k, v in glos.items()
-                  if v and k not in ("staging",)}
+    chart_data = {k: v for k, v in glos.items() if v and k not in ("staging",)}
     if chart_data:
         st.divider()
         st.markdown("**Phân bổ Glossary theo category**")
         df = pd.DataFrame.from_dict(chart_data, orient="index", columns=["Thuật ngữ"])
         st.bar_chart(df, color="#3B6D11")
 
-    # ── Chapter progress ───────────────────────────────────────────
     if total:
         st.divider()
         st.markdown("**Tiến độ dịch**")
@@ -912,7 +905,6 @@ def render_settings() -> None:
         v = env.get(key, "").strip().lower()
         return v in ("true", "1", "yes", "on") if v else default
 
-    # ── Header ─────────────────────────────────────────────────────
     hcol1, hcol2, hcol3 = st.columns([4, 1, 1])
     hcol1.subheader("Cài đặt")
     save_clicked  = hcol2.button("💾 Lưu .env",    type="primary")
@@ -928,7 +920,6 @@ def render_settings() -> None:
             "Điền thông tin và nhấn **Lưu .env** để tạo."
         )
 
-    # ── 8 tabs ────────────────────────────────────────────────────
     tabs = st.tabs([
         "🔑 API", "⚙️ Pipeline", "🔭 Scout AI",
         "📖 Glossary Suggest", "👤 Nhân vật",
@@ -1000,11 +991,12 @@ def render_settings() -> None:
             icon="ℹ️",
         )
 
+        # [FIX v5.3] Xóa `disabled=not three_call` — biến three_call đã bị xóa
         c1, c2, c3 = st.columns(3)
         pre_s  = c1.slider("Pre-call sleep (s)",  0, 30,
-                            ei("PRE_CALL_SLEEP", 5),   help="PRE_CALL_SLEEP",  disabled=not three_call)
+                            ei("PRE_CALL_SLEEP", 5),   help="PRE_CALL_SLEEP")
         post_s = c2.slider("Post-call sleep (s)", 0, 30,
-                            ei("POST_CALL_SLEEP", 5),  help="POST_CALL_SLEEP", disabled=not three_call)
+                            ei("POST_CALL_SLEEP", 5),  help="POST_CALL_SLEEP")
         post_r = c3.number_input("Post max retries", 0, 5,
                                   ei("POST_CALL_MAX_RETRIES", 2),
                                   help="POST_CALL_MAX_RETRIES")
@@ -1188,7 +1180,7 @@ def render_settings() -> None:
 def main() -> None:
     with st.sidebar:
         st.markdown("## 📖 LiTTrans")
-        st.caption("v4.5 — LitRPG / Tu Tiên Pipeline")
+        st.caption("v5.3 — LitRPG / Tu Tiên Pipeline")
         st.divider()
 
         _pages = {
@@ -1209,7 +1201,6 @@ def main() -> None:
 
         st.divider()
 
-        # Quick progress
         try:
             chs   = load_chapters()
             done  = sum(1 for c in chs if c["done"])
@@ -1218,7 +1209,6 @@ def main() -> None:
                 st.progress(done / total)
                 st.caption(f"{done}/{total} chương")
 
-            # Badge: staging terms từ Scout Suggest
             try:
                 from littrans.context.glossary import glossary_stats
                 glos_s    = glossary_stats()
@@ -1234,7 +1224,6 @@ def main() -> None:
         except Exception:
             pass
 
-        # [FIX] tách biệt trạng thái: translate pipeline vs clean operations
         if S.running:
             st.warning("🔄 Pipeline đang chạy…")
         if S.rt_running:
@@ -1247,7 +1236,6 @@ def main() -> None:
         env_ok = _ENV_PATH.exists()
         st.caption("✅ .env found" if env_ok else "⚠️  .env chưa có")
 
-    # ── Route ──────────────────────────────────────────────────────
     _route = {
         "translate" : render_translate,
         "chapters"  : render_chapters,
@@ -1255,7 +1243,7 @@ def main() -> None:
         "glossary"  : render_glossary,
         "stats"     : render_stats,
         "settings"  : render_settings,
-            "bible"     : lambda: render_bible(S),
+        "bible"     : lambda: render_bible(S),
     }
     _route.get(S.page, render_translate)()
 

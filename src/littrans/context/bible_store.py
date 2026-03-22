@@ -3,9 +3,6 @@ src/littrans/context/bible_store.py — BibleStore: đọc/ghi 3 tầng Bible.
 
 [Refactor] bible/ → context/. Import: bible.schemas → context.schemas.
 """
-# Nội dung giống hệt src/littrans/bible/bible_store.py
-# CHỈ THAY ĐỔI: dòng import schemas
-
 from __future__ import annotations
 
 import os
@@ -76,18 +73,6 @@ def _build_entity_automaton(index: dict[str, dict]):
         _entity_automaton_cache[cache_key] = A
         return A
 
-
-# ══════════════════════════════════════════════════════════════════
-# Toàn bộ class BibleStore giống hệt bible/bible_store.py
-# (copy nguyên, không sửa gì ngoài import ở trên)
-# ══════════════════════════════════════════════════════════════════
-
-# ⚠️  HƯỚNG DẪN DI CHUYỂN:
-# Copy toàn bộ nội dung class BibleStore từ src/littrans/bible/bible_store.py
-# vào đây, bắt đầu từ dòng "class BibleStore:" đến hết file.
-# Không cần sửa gì thêm — import schemas ở trên đã được sửa rồi.
-
-# Dưới đây là phần class đầy đủ — copy từ bible_store.py:
 
 class BibleStore:
     """Đọc/ghi toàn bộ 3 tầng Bible. Thread-safe, atomic write. In-memory cache."""
