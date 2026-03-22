@@ -23,6 +23,9 @@ Luồng (3-call, mặc định duy nhất từ v5.1):
 
 [v5.2] Xóa legacy 1-call flow (USE_THREE_CALL). Pipeline luôn dùng 3-call.
        Fix silent exception trong Bible mode → logging thay vì pass.
+
+[v5.3] Phase 3 refactor: imports top-level, _update_data_from_post dùng
+       module-level helpers _parse_list / _parse_characters / _parse_relationships.
 """
 from __future__ import annotations
 
@@ -31,6 +34,8 @@ import re
 import time
 import logging
 from pathlib import Path
+
+from pydantic import ValidationError
 
 from littrans.config.settings import settings
 from littrans.utils.io_utils import load_text, atomic_write
@@ -50,7 +55,64 @@ from littrans.llm.client import (
     call_translation,
     translation_model_info, is_rate_limit, handle_api_error, key_pool,
 )
+from littrans.llm.schemas import (
+    TermDetail, CharacterDetail, RelationshipUpdate, SkillUpdate,
+)
 
+
+# ── Pipeline data-parsing helpers ─────────────────────────────────────────────
+
+def _parse_list(raw: list, model_cls, label: str) -> list:
+    """Parse list[dict] → list[PydanticModel], bỏ qua item lỗi."""
+    result = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            result.append(model_cls.model_validate(item))
+        except (ValidationError, Exception) as e:
+            logging.warning(f"[Pipeline] {label} parse lỗi: {e}")
+    return result
+
+
+def _parse_characters(raw: list) -> list:
+    """Parse list[dict] → list[CharacterDetail], handle how_refers_to_others dict→list."""
+    result = []
+    for c in raw or []:
+        if not isinstance(c, dict) or not c.get("name"):
+            continue
+        try:
+            c = dict(c)
+            how = c.get("how_refers_to_others", [])
+            if isinstance(how, dict):
+                c["how_refers_to_others"] = [
+                    {"target": k, "style": v} for k, v in how.items()
+                ]
+            result.append(CharacterDetail.model_validate(c))
+        except (ValidationError, Exception) as e:
+            logging.warning(
+                f"[Pipeline] CharacterDetail parse lỗi [{c.get('name', '?')}]: {e}"
+            )
+    return result
+
+
+def _parse_relationships(raw: list, fallback_chapter: str) -> list:
+    """Parse list[dict] → list[RelationshipUpdate], inject chapter nếu thiếu."""
+    result = []
+    for r in raw or []:
+        if not isinstance(r, dict):
+            continue
+        if not r.get("character_a") or not r.get("character_b"):
+            continue
+        try:
+            r = {**r, "chapter": r.get("chapter") or fallback_chapter}
+            result.append(RelationshipUpdate.model_validate(r))
+        except (ValidationError, Exception) as e:
+            logging.warning(f"[Pipeline] RelationshipUpdate parse lỗi: {e}")
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════
 
 class Pipeline:
     """Singleton-like orchestrator. Tạo 1 instance, gọi .run() hoặc .retranslate()."""
@@ -377,74 +439,31 @@ class Pipeline:
 
     # ── Data update helpers ───────────────────────────────────────
 
-    def _update_data_from_post(self, post_result, filename, chapter_index, char_profiles):
+    def _update_data_from_post(
+        self,
+        post_result,
+        filename      : str,
+        chapter_index : int,
+        char_profiles : dict,
+    ) -> None:
         """Update Master State từ metadata của Post-call."""
-        from pydantic import ValidationError
-        from littrans.llm.schemas import (
-            TermDetail, CharacterDetail, RelationshipUpdate, RelationshipDetail,
-            SkillUpdate, PronounEntry,
-        )
+        # ── Thuật ngữ mới ─────────────────────────────────────────
+        term_objects = _parse_list(post_result.new_terms, TermDetail, "TermDetail")
+        if term_objects:
+            n = add_new_terms(term_objects, filename)
+            if n:
+                print(f"  📝 Thuật ngữ mới: {n}")
 
-        # ── new_terms ─────────────────────────────────────────────
-        if post_result.new_terms:
-            term_objects = []
-            for t in post_result.new_terms:
-                if not isinstance(t, dict):
-                    continue
-                try:
-                    term_objects.append(TermDetail.model_validate(t))
-                except (ValidationError, Exception) as e:
-                    logging.warning(f"[Pipeline] TermDetail parse lỗi: {e}")
-            if term_objects:
-                n = add_new_terms(term_objects, filename)
-                if n: print(f"  📝 Thuật ngữ mới: {n}")
+        # ── Kỹ năng mới / tiến hóa ───────────────────────────────
+        skill_objects = _parse_list(post_result.skill_updates, SkillUpdate, "SkillUpdate")
+        if skill_objects:
+            n = add_skill_updates(skill_objects, filename)
+            if n:
+                print(f"  ⚔️  Kỹ năng mới: {n}")
 
-        # ── skill_updates ─────────────────────────────────────────
-        if post_result.skill_updates:
-            skill_objects = []
-            for s in post_result.skill_updates:
-                if not isinstance(s, dict):
-                    continue
-                try:
-                    skill_objects.append(SkillUpdate.model_validate(s))
-                except (ValidationError, Exception) as e:
-                    logging.warning(f"[Pipeline] SkillUpdate parse lỗi: {e}")
-            if skill_objects:
-                n = add_skill_updates(skill_objects, filename)
-                if n: print(f"  ⚔️  Kỹ năng mới: {n}")
-
-        # ── new_characters → CharacterDetail đầy đủ ──────────────
-        char_objects = []
-        if post_result.new_characters:
-            for c in post_result.new_characters:
-                if not isinstance(c, dict) or not c.get("name"):
-                    continue
-                try:
-                    # Normalize nested lists trước khi validate
-                    c_normalized = dict(c)
-                    # how_refers_to_others: list[dict] → đảm bảo format đúng
-                    how_raw = c_normalized.get("how_refers_to_others", [])
-                    if isinstance(how_raw, dict):
-                        # backward compat: dict → list
-                        c_normalized["how_refers_to_others"] = [
-                            {"target": k, "style": v} for k, v in how_raw.items()
-                        ]
-                    char_objects.append(CharacterDetail.model_validate(c_normalized))
-                except (ValidationError, Exception) as e:
-                    logging.warning(f"[Pipeline] CharacterDetail parse lỗi [{c.get('name','?')}]: {e}")
-
-        # ── relationship_updates → RelationshipUpdate ─────────────
-        rel_objects = []
-        if post_result.relationship_updates:
-            for r in post_result.relationship_updates:
-                if not isinstance(r, dict) or not r.get("character_a") or not r.get("character_b"):
-                    continue
-                try:
-                    r_normalized = dict(r)
-                    r_normalized.setdefault("chapter", filename)
-                    rel_objects.append(RelationshipUpdate.model_validate(r_normalized))
-                except (ValidationError, Exception) as e:
-                    logging.warning(f"[Pipeline] RelationshipUpdate parse lỗi: {e}")
+        # ── Nhân vật & quan hệ ───────────────────────────────────
+        char_objects = _parse_characters(post_result.new_characters)
+        rel_objects  = _parse_relationships(post_result.relationship_updates, filename)
 
         if char_objects or rel_objects:
             n_chars, n_rels = update_from_response(
@@ -561,7 +580,7 @@ class Pipeline:
         print(f"\n{'═'*62}")
         trans_info  = translation_model_info()
         gemini_info = settings.gemini_model
-        print(f"  Pipeline Dịch Truyện v5.2 — Trans: {trans_info}")
+        print(f"  Pipeline Dịch Truyện v5.3 — Trans: {trans_info}")
         print(f"  Scout/Pre/Post             — Gemini: {gemini_info}")
         print(f"{'─'*62}")
         print(f"  Mode             : {mode_str}")

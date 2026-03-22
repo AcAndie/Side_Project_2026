@@ -13,13 +13,48 @@ src/littrans/bible/pipeline_bible_patch.py — Kết nối Bible System ↔ Pipe
                                    cập nhật last_seen + chapter_count trong Bible DB.
                                    KHÔNG tạo entity mới (đó là việc của BibleScanner).
 
-[v1.0] Initial implementation — gắn kết Bible System với pipeline 3-call flow.
+[v1.0] Initial implementation.
+[v1.1] Phase 5.1: pre-compile regex patterns thay vì compile lại trong vòng lặp.
+       Với Bible DB lớn (100+ nhân vật) tránh compile O(n) lần mỗi chapter.
 """
 from __future__ import annotations
 
 import re
 import logging
 from datetime import datetime
+
+
+# ── Regex helper ──────────────────────────────────────────────────
+
+def _compile_name_pattern(name: str):
+    """Compile word-boundary pattern cho tên nhân vật/entity."""
+    try:
+        return re.compile(
+            rf"(?<![^\W_]){re.escape(name.lower())}(?![^\W_])",
+            re.UNICODE,
+        )
+    except re.error:
+        return None   # tên có ký tự đặc biệt → fallback plain search
+
+
+def _build_entity_patterns(bc: dict) -> list[tuple[dict, re.Pattern | None, str]]:
+    """
+    Trả về list[(bc, pattern, name_lower)] cho canonical_name và en_name.
+    pattern=None → fallback plain contains.
+    """
+    entries = []
+    for name in [bc.get("canonical_name", ""), bc.get("en_name", "")]:
+        if not name or len(name) < 2:
+            continue
+        entries.append((bc, _compile_name_pattern(name), name.lower()))
+    return entries
+
+
+def _entity_matches(pattern, name_lower: str, text_lower: str) -> bool:
+    """Kiểm tra entity có xuất hiện trong text_lower không."""
+    if pattern is not None:
+        return bool(pattern.search(text_lower))
+    return name_lower in text_lower
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -52,12 +87,11 @@ def init_characters_from_bible() -> int:
     added = 0
 
     for bc in bible_chars:
-        # Key trong Characters_Active = canonical_name nếu có, fallback en_name
         name = (bc.get("canonical_name") or "").strip() or (bc.get("en_name") or "").strip()
         if not name or len(name) < 2:
             continue
         if name in active_chars:
-            continue   # đã có — không overwrite
+            continue
 
         active_chars[name] = _bible_char_to_active_profile(bc)
         added += 1
@@ -80,18 +114,13 @@ def build_bible_system_prompt(
     instructions : str,
     text         : str,
     filename     : str,
-    chapter_map  = None,           # ChapterMap | None — từ Pre-call
+    chapter_map  = None,
     name_lock    : dict | None = None,
     budget_limit : int = 0,
 ) -> str:
     """
     Wrapper — tạo BibleStore và gọi build_bible_translation_prompt().
-
-    Được gọi từ pipeline._translate_three_call khi:
-      settings.bible_mode=True AND settings.bible_available=True
-
-    Thay thế hoàn toàn build_translation_prompt() trong Bible mode —
-    dữ liệu glossary/characters/arc_memory đến từ Bible thay vì các file JSON cũ.
+    Được gọi từ pipeline._translate_three_call khi bible_mode=True.
     """
     from littrans.config.settings import settings
     from littrans.bible.bible_store import BibleStore
@@ -117,12 +146,10 @@ def update_bible_from_post(post_result, filename: str, chapter_text: str) -> Non
     """
     Cập nhật Bible DB sau mỗi chương dịch xong.
 
-    Chỉ cập nhật:
-      - last_seen = filename
-      - chapter_count += 1
+    Chỉ cập nhật last_seen và chapter_count — KHÔNG tạo entity mới.
 
-    KHÔNG tạo entity mới — đó là việc của BibleScanner.scan_one().
-    Không raise — lỗi chỉ log, không block pipeline.
+    [v1.1] Pre-compile tất cả regex patterns trước vòng lặp chính
+           thay vì compile trong mỗi iteration.
     """
     from littrans.config.settings import settings
     from littrans.bible.bible_store import BibleStore
@@ -130,9 +157,27 @@ def update_bible_from_post(post_result, filename: str, chapter_text: str) -> Non
     try:
         store      = BibleStore(settings.bible_dir)
         text_lower = chapter_text.lower()
+        bible_chars = store.get_all_characters()
 
-        for bc in store.get_all_characters():
-            if _entity_in_text(bc, text_lower):
+        if not bible_chars:
+            return
+
+        # Pre-compile tất cả patterns một lần
+        # entries: list[(bc, pattern_or_None, name_lower)]
+        all_entries: list[tuple[dict, re.Pattern | None, str]] = []
+        for bc in bible_chars:
+            all_entries.extend(_build_entity_patterns(bc))
+
+        # Deduplicate: mỗi bc chỉ update 1 lần dù match nhiều tên
+        updated_ids: set[str] = set()
+
+        for bc, pattern, name_lower in all_entries:
+            bc_id = bc.get("id", "")
+            if bc_id in updated_ids:
+                continue
+
+            if _entity_matches(pattern, name_lower, text_lower):
+                updated_ids.add(bc_id)
                 bc["last_seen"]     = filename
                 bc["chapter_count"] = bc.get("chapter_count", 0) + 1
                 bc["last_updated"]  = datetime.now().strftime("%Y-%m-%d")
@@ -141,6 +186,7 @@ def update_bible_from_post(post_result, filename: str, chapter_text: str) -> Non
                 except Exception as e:
                     name = bc.get("canonical_name") or bc.get("en_name", "?")
                     logging.warning(f"[BiblePatch] upsert last_seen [{name}]: {e}")
+
     except Exception as e:
         logging.error(f"[BiblePatch] update_bible_from_post {filename}: {e}")
 
@@ -149,30 +195,10 @@ def update_bible_from_post(post_result, filename: str, chapter_text: str) -> Non
 # HELPERS
 # ═══════════════════════════════════════════════════════════════════
 
-def _entity_in_text(bc: dict, text_lower: str) -> bool:
-    """Kiểm tra entity có xuất hiện trong chapter text không."""
-    for name in [bc.get("canonical_name", ""), bc.get("en_name", "")]:
-        if not name or len(name) < 2:
-            continue
-        try:
-            if re.search(
-                rf"(?<![^\W_]){re.escape(name.lower())}(?![^\W_])",
-                text_lower,
-                re.UNICODE,
-            ):
-                return True
-        except re.error:
-            if name.lower() in text_lower:
-                return True
-    return False
-
-
 def _bible_char_to_active_profile(bc: dict) -> dict:
     """
     Convert BibleCharacter dict → Characters_Active profile format.
-
     Tạo profile tối thiểu — đủ để pipeline đọc xưng hô và personality.
-    Pipeline sẽ enrich thêm qua Post-call theo thời gian.
     """
     cult  = bc.get("cultivation") or {}
     rels: dict = {}
@@ -182,15 +208,15 @@ def _bible_char_to_active_profile(bc: dict) -> dict:
         if not target:
             continue
         rels[target] = {
-            "type"           : r.get("rel_type", "neutral"),
-            "feeling"        : "",
-            "dynamic"        : r.get("dynamic", ""),
-            "pronoun_status" : "weak",   # Bible rels mặc định weak — xác nhận dần
-            "current_status" : r.get("description", ""),
-            "tension_points" : [],
-            "history"        : [],
-            "intimacy_level" : r.get("eps_level", 2),
-            "eps_signals"    : [],
+            "type"          : r.get("rel_type", "neutral"),
+            "feeling"       : "",
+            "dynamic"       : r.get("dynamic", ""),
+            "pronoun_status": "weak",
+            "current_status": r.get("description", ""),
+            "tension_points": [],
+            "history"       : [],
+            "intimacy_level": r.get("eps_level", 2),
+            "eps_signals"   : [],
         }
 
     personality_traits = []

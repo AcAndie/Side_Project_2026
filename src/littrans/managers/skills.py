@@ -6,48 +6,127 @@ Dùng để:
   1. Tra cứu tên VN đã chốt khi dịch bảng hệ thống
   2. Nhận báo cáo kỹ năng mới/tiến hóa từ AI → cập nhật Skills.json
   3. Filter cho prompt: chỉ đưa vào kỹ năng XUẤT HIỆN trong chương
+
+[v2.0] Refactor dùng BaseManager — public API (module-level functions) không đổi.
 """
 from __future__ import annotations
 
 import re
-import threading
 
 from littrans.config.settings import settings
-from littrans.utils.io_utils import load_json, save_json
-
-_lock = threading.Lock()
+from littrans.managers.base import BaseManager
 
 
-# ── Private helpers ───────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════
+# MANAGER
+# ═══════════════════════════════════════════════════════════════════
 
-def _empty_db() -> dict:
-    return {
-        "meta"  : {"schema_version": "1.0", "last_updated_chapter": ""},
-        "skills": {},
-    }
+class SkillsManager(BaseManager):
+
+    def _empty_db(self) -> dict:
+        return {
+            "meta"  : {"schema_version": "1.0", "last_updated_chapter": ""},
+            "skills": {},
+        }
+
+    def stats(self) -> dict[str, int]:
+        skills = self._load().get("skills", {})
+        evos   = sum(1 for s in skills.values() if s.get("evolved_from"))
+        return {"total": len(skills), "evolution": evos, "base": len(skills) - evos}
+
+    # ── Read ──────────────────────────────────────────────────────
+
+    def load_for_chapter(self, chapter_text: str) -> dict[str, dict]:
+        """
+        Trả về {english_name: skill_record} cho kỹ năng XUẤT HIỆN trong chương.
+        Đưa vào prompt phần System Box.
+        """
+        skills = self._load().get("skills", {})
+        result = {}
+        for eng, rec in skills.items():
+            vn      = rec.get("vietnamese", "")
+            vn_bare = vn.strip("[]")
+            if (
+                (eng and re.search(rf"\b{re.escape(eng)}\b", chapter_text, re.IGNORECASE))
+                or (vn_bare and re.search(rf"\b{re.escape(vn_bare)}\b", chapter_text, re.IGNORECASE))
+            ):
+                result[eng] = rec
+        return result
+
+    # ── Write ─────────────────────────────────────────────────────
+
+    def add_updates(self, updates: list, source_chapter: str) -> int:
+        """
+        Thêm kỹ năng mới / cập nhật evolution chain vào Skills.json.
+        Trả về số kỹ năng thực sự thêm/cập nhật.
+        """
+        if not updates:
+            return 0
+
+        self.ensure_dir()
+
+        with self._lock:
+            data   = self._load_locked()
+            skills = data.setdefault("skills", {})
+            count  = 0
+
+            for upd in updates:
+                eng = upd.english.strip()
+                vn  = upd.vietnamese.strip()
+                if not eng or not vn:
+                    continue
+
+                if eng in skills:
+                    existing = skills[eng]
+                    changed  = False
+
+                    if upd.evolved_from and upd.evolved_from != existing.get("evolved_from", ""):
+                        existing["evolved_from"] = upd.evolved_from
+                        chain = existing.setdefault(
+                            "evolution_chain", [existing.get("vietnamese", vn)]
+                        )
+                        if vn not in chain:
+                            chain.append(vn)
+                        existing["vietnamese"] = vn
+                        changed = True
+
+                    if upd.description and not existing.get("description"):
+                        existing["description"] = upd.description
+                        changed = True
+
+                    if changed:
+                        count += 1
+                else:
+                    skills[eng] = {
+                        "vietnamese"     : vn,
+                        "owner"          : upd.owner,
+                        "skill_type"     : upd.skill_type,
+                        "evolved_from"   : upd.evolved_from,
+                        "description"    : upd.description,
+                        "first_seen"     : source_chapter,
+                        "evolution_chain": (
+                            [vn] if not upd.evolved_from else [upd.evolved_from, vn]
+                        ),
+                    }
+                    count += 1
+
+            if count:
+                data["meta"]["last_updated_chapter"] = source_chapter
+                self._save(data)
+
+        return count
 
 
-def _load() -> dict:
-    return load_json(settings.skills_file) or _empty_db()
+# ═══════════════════════════════════════════════════════════════════
+# MODULE-LEVEL SINGLETON + PUBLIC API
+# Call-sites không cần đổi gì.
+# ═══════════════════════════════════════════════════════════════════
 
+_manager = SkillsManager(settings.skills_file)
 
-# ── Public API ────────────────────────────────────────────────────
 
 def load_skills_for_chapter(chapter_text: str) -> dict[str, dict]:
-    """
-    Trả về {english_name: skill_record} cho các kỹ năng XUẤT HIỆN trong chương.
-    Đưa vào prompt phần System Box.
-    """
-    data   = _load()
-    skills = data.get("skills", {})
-    result = {}
-    for eng, rec in skills.items():
-        vn      = rec.get("vietnamese", "")
-        vn_bare = vn.strip("[]")
-        if (eng and re.search(rf"\b{re.escape(eng)}\b", chapter_text, re.IGNORECASE)) or \
-           (vn_bare and re.search(rf"\b{re.escape(vn_bare)}\b", chapter_text, re.IGNORECASE)):
-            result[eng] = rec
-    return result
+    return _manager.load_for_chapter(chapter_text)
 
 
 def format_skills_for_prompt(skills: dict[str, dict]) -> str:
@@ -71,64 +150,8 @@ def format_skills_for_prompt(skills: dict[str, dict]) -> str:
 
 
 def add_skill_updates(updates: list, source_chapter: str) -> int:
-    """
-    Thêm kỹ năng mới / cập nhật tiến hóa vào Skills.json.
-    Trả về số kỹ năng thực sự thêm/cập nhật.
-    """
-    if not updates:
-        return 0
-
-    settings.skills_file.parent.mkdir(parents=True, exist_ok=True)
-
-    with _lock:
-        data   = _load()
-        skills = data.setdefault("skills", {})
-        count  = 0
-
-        for upd in updates:
-            eng = upd.english.strip()
-            vn  = upd.vietnamese.strip()
-            if not eng or not vn:
-                continue
-
-            if eng in skills:
-                existing = skills[eng]
-                changed  = False
-
-                if upd.evolved_from and upd.evolved_from != existing.get("evolved_from", ""):
-                    existing["evolved_from"] = upd.evolved_from
-                    chain = existing.setdefault("evolution_chain", [existing.get("vietnamese", vn)])
-                    if vn not in chain:
-                        chain.append(vn)
-                    existing["vietnamese"] = vn
-                    changed = True
-
-                if upd.description and not existing.get("description"):
-                    existing["description"] = upd.description
-                    changed = True
-
-                if changed:
-                    count += 1
-            else:
-                skills[eng] = {
-                    "vietnamese"     : vn,
-                    "owner"          : upd.owner,
-                    "skill_type"     : upd.skill_type,
-                    "evolved_from"   : upd.evolved_from,
-                    "description"    : upd.description,
-                    "first_seen"     : source_chapter,
-                    "evolution_chain": [vn] if not upd.evolved_from else [upd.evolved_from, vn],
-                }
-                count += 1
-
-        if count:
-            data["meta"]["last_updated_chapter"] = source_chapter
-            save_json(settings.skills_file, data)
-
-    return count
+    return _manager.add_updates(updates, source_chapter)
 
 
 def skills_stats() -> dict[str, int]:
-    skills = _load().get("skills", {})
-    evos   = sum(1 for s in skills.values() if s.get("evolved_from"))
-    return {"total": len(skills), "evolution": evos, "base": len(skills) - evos}
+    return _manager.stats()
