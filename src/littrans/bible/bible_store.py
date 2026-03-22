@@ -91,8 +91,13 @@ def _build_entity_automaton(index: dict[str, dict]):
     """
     Xây Aho-Corasick automaton từ index.
     Cache theo hash của frozenset(keys) — nếu index thay đổi thì rebuild.
+    Trả về None nếu index rỗng hoặc chưa cài pyahocorasick.
     """
     if not _AHO_AVAILABLE:
+        return None
+
+    # Index rỗng (scan lần đầu) → không có gì để match, trả về None
+    if not index:
         return None
 
     cache_key = hash(frozenset(index.keys()))
@@ -101,10 +106,17 @@ def _build_entity_automaton(index: dict[str, dict]):
         if cache_key in _entity_automaton_cache:
             return _entity_automaton_cache[cache_key]
 
-        A = _ahocorasick.Automaton()
+        A    = _ahocorasick.Automaton()
+        added = 0
         for name_key, entry in index.items():
             if len(name_key) >= 3:
                 A.add_word(name_key, (name_key, entry))
+                added += 1
+
+        # make_automaton() sẽ crash nếu không có word nào được add
+        if added == 0:
+            return None
+
         A.make_automaton()
 
         # LRU: giữ tối đa _ENTITY_AHO_CACHE_MAX automaton

@@ -1,14 +1,22 @@
 # ── Secrets ──────────────────────────────────────────────────────
-# KHÔNG BAO GIỜ bake .env vào image (mount read-only khi runtime)
+# KHÔNG BAO GIỜ commit .env vào git
 .env
 
 # ── User data ─────────────────────────────────────────────────────
-# Mount làm bind volumes khi chạy — không cần trong image
+# Mount làm bind volumes khi chạy — không cần trong repo
 inputs/
 outputs/
 data/
 logs/
 Reports/
+
+# ── Bible System runtime files ────────────────────────────────────
+# Lock file tạo ra khi consolidation đang chạy
+.consolidate.lock
+
+# Backup files từ data_versioning.py (prune tự động giữ 3 bản)
+*.bak.*
+*.bak
 
 # ── Python artifacts ──────────────────────────────────────────────
 __pycache__/
@@ -22,7 +30,7 @@ build/
 venv/
 .pytest_cache/
 
-# ── Backup files ──────────────────────────────────────────────────
+# ── Backup files chung ────────────────────────────────────────────
 *.bak*
 *.tmp
 
@@ -32,9 +40,8 @@ venv/
 .vscode/
 .idea/
 *.DS_Store
+Thumbs.db
 
 # ── Docs ──────────────────────────────────────────────────────────
-# Không cần trong image — tiết kiệm layer size
-readme.md
 CHANGELOG.md
 LICENSE
