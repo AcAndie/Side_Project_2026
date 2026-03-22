@@ -121,14 +121,14 @@ def _save_env(updates: dict[str, str]) -> None:
 
 
 # ── Cached data loaders ───────────────────────────────────────────
-@st.cache_data(ttl=3)
+@st.cache_data(ttl=10)
 def load_chapters() -> list[dict]:
     """Đọc danh sách chương từ inputs/ và outputs/. Không cần API key."""
     try:
         from littrans.config.settings import settings
         input_dir  = settings.input_dir
         output_dir = settings.output_dir
-    except (Exception, SystemExit):
+    except Exception:
         input_dir  = _ROOT / "inputs"
         output_dir = _ROOT / "outputs"
 
@@ -151,11 +151,30 @@ def load_chapters() -> list[dict]:
             "size"   : f"{fp.stat().st_size // 1024} KB",
             "vn_path": vn_path,
             "done"   : vn_path.exists(),
-            "raw"    : fp.read_text(encoding="utf-8", errors="replace"),
-            "vn"     : vn_path.read_text(encoding="utf-8", errors="replace")
-                       if vn_path.exists() else "",
+            # "raw" and "vn" are loaded lazily via load_chapter_content()
         })
     return result
+
+
+
+@st.cache_data(ttl=30)
+def load_chapter_content(path_str: str, vn_path_str: str, done: bool) -> dict[str, str]:
+    """
+    Lazy load: đọc nội dung file khi cần, cache 30s.
+    Nhận str thay vì Path để st.cache_data hoạt động đúng.
+    """
+    raw = ""
+    vn  = ""
+    try:
+        raw = Path(path_str).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    if done:
+        try:
+            vn = Path(vn_path_str).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    return {"raw": raw, "vn": vn}
 
 
 @st.cache_data(ttl=4)
@@ -166,7 +185,7 @@ def load_characters() -> dict[str, dict]:
             "active" : load_active().get("characters", {}),
             "archive": load_archive().get("characters", {}),
         }
-    except (Exception, SystemExit):
+    except Exception:
         return {"active": {}, "archive": {}}
 
 
@@ -175,7 +194,7 @@ def load_glossary_data() -> dict[str, list[tuple[str, str]]]:
     try:
         from littrans.context.glossary import _load_all
         raw = _load_all()
-    except (Exception, SystemExit):
+    except Exception:
         return {}
     result: dict[str, list] = {}
     for cat, terms in raw.items():
@@ -204,7 +223,7 @@ def load_stats() -> dict:
             "skills": skills_stats(),
             "lock"  : lock_stats(),
         }
-    except (Exception, SystemExit):
+    except Exception:
         return {"chars": {}, "glos": {}, "skills": {}, "lock": {}}
 
 
@@ -309,8 +328,11 @@ p{{margin-bottom:10px}}p:last-child{{margin:0}}
 
 
 # ── Queue polling + log display ───────────────────────────────────
-def _poll(q_key: str, logs_key: str) -> bool:
-    """Drain queue → session state list. Returns True khi nhận __DONE__."""
+def _poll(q_key: str, logs_key: str, thread_key: str | None = None) -> bool:
+    """
+    Drain queue → session state list. Returns True khi nhận __DONE__.
+    thread_key: session state key của thread — dùng để detect zombie thread.
+    """
     q: queue.Queue | None = S.get(q_key)
     if q is None:
         return False
@@ -324,6 +346,12 @@ def _poll(q_key: str, logs_key: str) -> bool:
                 S[logs_key].append(msg)
         except queue.Empty:
             break
+    # Zombie thread guard: thread đã chết mà không gửi __DONE__
+    if not done and thread_key:
+        thread = S.get(thread_key)
+        if thread is not None and not thread.is_alive():
+            S[logs_key].append("⚠️  Background thread đã dừng bất ngờ.")
+            done = True
     return done
 
 
@@ -353,7 +381,7 @@ def render_translate() -> None:
             try:
                 from littrans.config.settings import settings as cfg
                 inp = cfg.input_dir
-            except (Exception, SystemExit):
+            except Exception:
                 inp = _ROOT / "inputs"
             inp.mkdir(parents=True, exist_ok=True)
             for f in uploaded:
@@ -409,7 +437,7 @@ def render_translate() -> None:
     # ── Live log ───────────────────────────────────────────────────
     if S.running or S.logs:
         if S.running:
-            done_flag = _poll("log_q", "logs")
+            done_flag = _poll("log_q", "logs", "run_thread")
             if done_flag:
                 S.running = False
                 S.logs.append("─" * 56)
@@ -465,6 +493,11 @@ def render_chapters() -> None:
 
 
 def _render_chapter_detail(ch: dict) -> None:
+    # ── Lazy load nội dung file ────────────────────────────────────
+    content = load_chapter_content(str(ch["path"]), str(ch["vn_path"]), ch["done"])
+    raw = content["raw"]
+    vn  = content["vn"]
+
     # ── Meta strip ─────────────────────────────────────────────────
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("File", ch["name"])
@@ -473,11 +506,11 @@ def _render_chapter_detail(ch: dict) -> None:
 
     # Name Lock violations
     nl_count = 0
-    if ch["done"] and ch["vn"]:
+    if ch["done"] and vn:
         try:
             from littrans.context.name_lock import build_name_lock_table, validate_translation
-            nl_count = len(validate_translation(ch["vn"], build_name_lock_table()))
-        except (Exception, SystemExit):
+            nl_count = len(validate_translation(vn, build_name_lock_table()))
+        except Exception:
             pass
     nl_label = f"⚠️ {nl_count} vi phạm" if nl_count else "✅ 0 vi phạm"
     m4.metric("Name Lock", nl_label)
@@ -488,16 +521,16 @@ def _render_chapter_detail(ch: dict) -> None:
     with tabs[0]:
         if not ch["done"]:
             st.info("Chương chưa dịch — chỉ hiển thị bản gốc.")
-            st.text_area("", ch["raw"], height=420, disabled=True,
+            st.text_area("", raw, height=420, disabled=True,
                          label_visibility="collapsed")
-        elif not ch["raw"]:
+        elif not raw:
             st.warning("Không đọc được file gốc.")
         else:
-            split_view(ch["raw"], ch["vn"])
+            split_view(raw, vn)
 
     with tabs[1]:
-        if ch["raw"]:
-            st.text_area("", ch["raw"], height=500, disabled=True,
+        if raw:
+            st.text_area("", raw, height=500, disabled=True,
                          label_visibility="collapsed")
             if st.button("📋 Sao chép bản gốc", key="cp_raw"):
                 st.toast("Đã sao chép vào clipboard!", icon="✅")
@@ -505,15 +538,15 @@ def _render_chapter_detail(ch: dict) -> None:
             st.info("Không đọc được file gốc.")
 
     with tabs[2]:
-        if ch["done"] and ch["vn"]:
-            st.text_area("", ch["vn"], height=500, disabled=True,
+        if ch["done"] and vn:
+            st.text_area("", vn, height=500, disabled=True,
                          label_visibility="collapsed")
             c1, c2 = st.columns([1, 5])
             if c1.button("📋 Sao chép bản dịch", key="cp_vn"):
                 st.toast("Đã sao chép!", icon="✅")
             c2.download_button(
                 "⬇ Tải xuống",
-                data=ch["vn"].encode("utf-8"),
+                data=vn.encode("utf-8"),
                 file_name=f"{ch['path'].stem}_VN.txt",
                 mime="text/plain",
                 key="dl_vn",
@@ -526,7 +559,7 @@ def _render_chapter_detail(ch: dict) -> None:
     with tabs[3]:
         if not ch["done"]:
             st.info("Cần có bản dịch để xem diff.")
-        elif not ch["raw"] or not ch["vn"]:
+        elif not raw or not vn:
             st.warning("Thiếu nội dung để so sánh.")
         else:
             st.caption(
@@ -534,7 +567,7 @@ def _render_chapter_detail(ch: dict) -> None:
                 "🟡 Đoạn thay đổi · "
                 "🔴 Đoạn trong EN nhưng không có trong VN"
             )
-            diff_view(ch["raw"], ch["vn"])
+            diff_view(raw, vn)
 
     # ── Retranslate panel ──────────────────────────────────────────
     st.divider()
@@ -581,7 +614,7 @@ def _render_chapter_detail(ch: dict) -> None:
 
             if S.rt_running or S.rt_logs:
                 if S.rt_running:
-                    rt_done = _poll("rt_q", "rt_logs")
+                    rt_done = _poll("rt_q", "rt_logs", "rt_thread")
                     if rt_done:
                         S.rt_running = False
                         S.rt_logs.append("─" * 56)
@@ -961,10 +994,11 @@ def render_settings() -> None:
     # ── TAB 1: Pipeline ────────────────────────────────────────────
     with tabs[1]:
         st.markdown("#### Kiến trúc")
-        three_call = st.toggle("3-call mode (Pre → Trans → Post)",
-                               value=eb("USE_THREE_CALL", True),
-                               help="USE_THREE_CALL")
-        updates["USE_THREE_CALL"] = "true" if three_call else "false"
+        st.info(
+            "Pipeline luôn dùng **3-call flow** (Pre → Trans → Post). "
+            "Mode duy nhất từ v5.2 — không có toggle.",
+            icon="ℹ️",
+        )
 
         c1, c2, c3 = st.columns(3)
         pre_s  = c1.slider("Pre-call sleep (s)",  0, 30,
@@ -973,10 +1007,10 @@ def render_settings() -> None:
                             ei("POST_CALL_SLEEP", 5),  help="POST_CALL_SLEEP", disabled=not three_call)
         post_r = c3.number_input("Post max retries", 0, 5,
                                   ei("POST_CALL_MAX_RETRIES", 2),
-                                  help="POST_CALL_MAX_RETRIES", disabled=not three_call)
+                                  help="POST_CALL_MAX_RETRIES")
         retry_q = st.toggle("Retry Trans-call khi Post báo lỗi dịch thuật",
                              value=eb("TRANS_RETRY_ON_QUALITY", True),
-                             help="TRANS_RETRY_ON_QUALITY", disabled=not three_call)
+                             help="TRANS_RETRY_ON_QUALITY")
         updates.update({
             "PRE_CALL_SLEEP"        : str(pre_s),
             "POST_CALL_SLEEP"       : str(post_s),
@@ -1164,7 +1198,7 @@ def main() -> None:
             "glossary"  : "📚  Từ điển",
             "stats"     : "📊  Thống kê",
             "settings"  : "⚙️   Cài đặt",
-        "bible"     : "📖  Bible",
+            "bible"     : "📖  Bible",
         }
         for key, label in _pages.items():
             t = "primary" if S.page == key else "secondary"
@@ -1194,7 +1228,7 @@ def main() -> None:
                         f'<span class="badge badge-warn">📖 {staging_n} thuật ngữ chờ phân loại</span>',
                         unsafe_allow_html=True,
                     )
-            except (Exception, SystemExit):
+            except Exception:
                 pass
 
         except Exception:
@@ -1221,7 +1255,7 @@ def main() -> None:
         "glossary"  : render_glossary,
         "stats"     : render_stats,
         "settings"  : render_settings,
-        "bible"     : render_bible,
+            "bible"     : lambda: render_bible(S),
     }
     _route.get(S.page, render_translate)()
 

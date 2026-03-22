@@ -507,7 +507,7 @@ class Pipeline:
             n = count_pending_terms()
             if settings.auto_merge_glossary:
                 print(f"\n📚 Auto-merge ~{n} thuật ngữ...")
-                from littrans.cli.tool_clean import clean_glossary
+                from littrans.cli.tool_clean_glossary import clean_glossary
                 clean_glossary()
             else:
                 print(f"\n💡 Có ~{n} thuật ngữ mới. Chạy: python scripts/main.py clean glossary")
@@ -516,7 +516,7 @@ class Pipeline:
         if n_staging:
             if settings.auto_merge_characters:
                 print(f"\n👤 Auto-merge {n_staging} nhân vật...")
-                from littrans.cli.tool_clean import run_action
+                from littrans.cli.tool_clean_chars import run_action
                 run_action("merge")
             else:
                 print(f"\n💡 Có {n_staging} nhân vật mới. Chạy: python scripts/main.py clean characters --action merge")
