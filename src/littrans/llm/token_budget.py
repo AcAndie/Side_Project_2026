@@ -17,6 +17,18 @@ PRIORITY ORDER (cắt từ ít quan trọng nhất):
 
 [v4.2] Character scoring dùng regex word-boundary thay vì str.count()
        để tránh false match cho tên ngắn (vd: "Li" match vào "likely").
+
+[v4.3 FIX] Đồng bộ regex pattern với name_lock.py:
+       Dùng lookaround Unicode (?<![^\W_])...(?![^\W_]) thay vì
+       (?<![a-zA-Z0-9_]) vốn chỉ xử lý ASCII.
+
+       Vấn đề cũ: (?<![a-zA-Z0-9_]) không nhận ra ký tự tiếng Việt
+       có dấu (ấ, ổ, ư...) là word character → False Positive khi tên
+       xuất hiện dính liền ký tự có dấu.
+
+       Pattern mới (?<![^\W_]) tương đương: "không đứng trước ký tự
+       nào mà KHÔNG phải non-word hoặc dấu gạch dưới" — hoạt động
+       đúng với mọi Unicode script.
 """
 from __future__ import annotations
 
@@ -39,16 +51,25 @@ def estimate_tokens(text: str, lang: str = "vn") -> int:
 def _score_character_relevance(name: str, profile: str, chapter_text_lower: str) -> int:
     """
     Tính điểm liên quan của nhân vật với chương hiện tại.
-    Dùng regex lookaround thay vì str.count() để tránh false match tên ngắn.
+
+    [FIX v4.3] Dùng lookaround Unicode thay vì ASCII character class:
+      TRƯỚC: (?<![a-zA-Z0-9_])...(?![a-zA-Z0-9_])
+             → Sai với tiếng Việt: "ỹAn" → "ỹ" không trong [a-zA-Z0-9_]
+               nên match "An" dù dính với ký tự có dấu.
+
+      SAU: (?<![^\W_])...(?![^\W_])
+           → Nhất quán với name_lock.py và characters.py.
+           → \\W = non-word (bao gồm space, dấu câu, ký tự đặc biệt).
+           → [^\W_] = word character trừ dấu gạch dưới.
+           → Lookaround này đúng với mọi Unicode, kể cả tiếng Việt.
 
     Điểm = số lần xuất hiện có word-boundary + bonus 100 nếu không phải Archive.
     """
     try:
-        # Lookaround: không đi trước/sau bởi ký tự chữ-số
-        pattern = rf"(?<![a-zA-Z0-9_]){re.escape(name.lower())}(?![a-zA-Z0-9_])"
-        count   = len(re.findall(pattern, chapter_text_lower, re.IGNORECASE))
+        pattern = rf"(?<![^\W_]){re.escape(name.lower())}(?![^\W_])"
+        count   = len(re.findall(pattern, chapter_text_lower, re.IGNORECASE | re.UNICODE))
     except re.error:
-        # Fallback an toàn nếu tên chứa ký tự đặc biệt
+        # Fallback an toàn nếu tên chứa ký tự đặc biệt gây lỗi regex
         count = chapter_text_lower.count(name.lower())
 
     archive_penalty = 0 if "[ARCHIVE]" not in profile else -50

@@ -1,19 +1,9 @@
 """
 src/littrans/llm/client.py — Gemini API client + Multi-Key Pool + Anthropic dispatcher.
 
-ApiKeyPool quản lý nhiều Gemini API key.
-Call functions:
-  call_gemini()             → structured JSON (TranslationResult) — flow cũ
-  call_translation()        → ★ MỚI: dispatcher tự chọn Gemini/Anthropic theo settings
-  call_gemini_translation() → plain text — Gemini (vẫn giữ để backward compat)
-  call_anthropic_translation() → plain text — Claude (mới v4.5)
-  call_gemini_text()        → plain text tự do (Scout, Arc Memory)
-  call_gemini_json()        → free JSON (Emotion, Glossary, Pre-call, Post-call)
-
-[v4.5] Dual-Model support:
-  - Anthropic SDK lazy-imported (không crash nếu chưa cài khi dùng gemini-only)
-  - call_translation() là entry point duy nhất mà pipeline nên gọi
-  - Retry logic và rate-limit handling nhất quán cho cả 2 provider
+[v4.5] Dual-Model support.
+[v4.6] Timeout: API_TIMEOUT=90s + _call_with_timeout() wrapper.
+       Tránh thread bị block vô thời hạn khi API treo không trả lỗi.
 """
 from __future__ import annotations
 
@@ -21,6 +11,7 @@ import re
 import json
 import logging
 import threading
+import concurrent.futures
 from pydantic import ValidationError
 from google import genai
 from google.genai import types
@@ -29,12 +20,44 @@ from littrans.config.settings import settings
 from littrans.llm.schemas import TranslationResult, GEMINI_SCHEMA
 
 
+# ── Timeout cho mọi API call ──────────────────────────────────────
+# 90s: đủ lớn cho chapter ~15k chars, đủ nhỏ để không treo UI mãi.
+API_TIMEOUT: int = 90
+
+
 # ═══════════════════════════════════════════════════════════════════
 # EXCEPTIONS
 # ═══════════════════════════════════════════════════════════════════
 
 class AllKeysExhaustedError(Exception):
     """Tất cả API key đều hết quota."""
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TIMEOUT WRAPPER
+# ═══════════════════════════════════════════════════════════════════
+
+def _call_with_timeout(fn, timeout: int = API_TIMEOUT):
+    """
+    Chạy fn() trong thread riêng, raise TimeoutError nếu quá hạn.
+
+    Dùng cho mọi blocking API call (Gemini, Anthropic) để tránh thread
+    bị treo vô thời hạn khi mạng chậm hoặc API server không phản hồi.
+
+    Lý do dùng ThreadPoolExecutor thay vì asyncio:
+      - Toàn bộ pipeline hiện tại là synchronous.
+      - Không cần event loop, không phụ thuộc SDK version.
+      - concurrent.futures.TimeoutError → raise TimeoutError rõ ràng.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError(
+                f"API call timed out sau {timeout}s — "
+                "kiểm tra kết nối mạng hoặc tăng API_TIMEOUT trong client.py."
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -113,6 +136,8 @@ def _get_anthropic_client():
     """
     Lazy-init Anthropic client.
     Không import lúc module load để tránh crash khi chưa cài anthropic SDK.
+
+    [v4.6] timeout=API_TIMEOUT: tránh treo khi Anthropic server không phản hồi.
     """
     global _anthropic_client
     if _anthropic_client is not None:
@@ -127,7 +152,10 @@ def _get_anthropic_client():
                 "❌ Cần cài anthropic SDK: pip install anthropic\n"
                 "   Hoặc: pip install 'littrans[anthropic]'"
             )
-        _anthropic_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        _anthropic_client = anthropic.Anthropic(
+            api_key=settings.anthropic_api_key,
+            timeout=float(API_TIMEOUT),   # [FIX v4.6] tránh treo vô thời hạn
+        )
         return _anthropic_client
 
 
@@ -141,9 +169,6 @@ def call_translation(system_prompt: str, chapter_text: str) -> str:
 
     Tự động dispatch sang Gemini hoặc Anthropic dựa trên
     settings.translation_provider và settings.translation_model.
-
-    Pipeline LUÔN dùng hàm này thay vì gọi thẳng call_gemini_translation()
-    hay call_anthropic_translation().
     """
     if settings.using_anthropic:
         return call_anthropic_translation(system_prompt, chapter_text)
@@ -152,10 +177,6 @@ def call_translation(system_prompt: str, chapter_text: str) -> str:
 
 
 def translation_model_info() -> str:
-    """
-    Trả về chuỗi mô tả model đang dùng để in ra log.
-    VD: "claude-sonnet-4-6 (anthropic)" hoặc "gemini-2.0-flash-exp (gemini)"
-    """
     return f"{settings.translation_model} ({settings.translation_provider})"
 
 
@@ -164,20 +185,20 @@ def translation_model_info() -> str:
 # ═══════════════════════════════════════════════════════════════════
 
 def call_gemini(system_prompt: str, chapter_text: str) -> TranslationResult:
-    """
-    Flow cũ — Gọi Gemini với structured output → TranslationResult.
-    Giữ nguyên để backward compatible khi USE_THREE_CALL=false.
-    """
-    response = key_pool.current_client.models.generate_content(
-        model=settings.gemini_model,
-        contents=chapter_text,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            temperature=0.4,
-            response_schema=GEMINI_SCHEMA,
-            response_mime_type="application/json",
-        ),
-    )
+    """Flow cũ — structured output → TranslationResult."""
+    def _do():
+        return key_pool.current_client.models.generate_content(
+            model=settings.gemini_model,
+            contents=chapter_text,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.4,
+                response_schema=GEMINI_SCHEMA,
+                response_mime_type="application/json",
+            ),
+        )
+
+    response = _call_with_timeout(_do)
 
     if hasattr(response, "usage_metadata") and response.usage_metadata:
         u = response.usage_metadata
@@ -195,22 +216,26 @@ def call_gemini(system_prompt: str, chapter_text: str) -> TranslationResult:
 def call_gemini_translation(system_prompt: str, chapter_text: str) -> str:
     """
     Gemini Trans-call — plain text output.
-    Dùng settings.translation_model nếu provider là gemini,
-    fallback về settings.gemini_model nếu không.
+
+    [v4.6] Wrapped trong _call_with_timeout() để tránh thread treo.
     """
     model = (
         settings.translation_model
         if settings.translation_provider == "gemini"
         else settings.gemini_model
     )
-    response = key_pool.current_client.models.generate_content(
-        model=model,
-        contents=chapter_text,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            temperature=0.4,
-        ),
-    )
+
+    def _do():
+        return key_pool.current_client.models.generate_content(
+            model=model,
+            contents=chapter_text,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.4,
+            ),
+        )
+
+    response = _call_with_timeout(_do)
 
     if hasattr(response, "usage_metadata") and response.usage_metadata:
         u = response.usage_metadata
@@ -232,26 +257,24 @@ def call_anthropic_translation(system_prompt: str, chapter_text: str) -> str:
     """
     Anthropic (Claude) Trans-call — plain text output.
 
-    Đặc điểm so với Gemini:
-      - system_prompt đi vào `system` param (không phải system_instruction)
-      - chapter_text đi vào messages[user]
-      - Temperature mặc định 1.0 cho Claude (khuyến nghị của Anthropic)
-      - Không dùng structured output — plain text như Gemini translation call
-
-    Raise exception khi thất bại — caller quyết định retry.
+    [v4.6] Wrapped trong _call_with_timeout() — timeout được set cả ở
+    client level (httpx) lẫn wrapper level để double-protection.
     """
     client = _get_anthropic_client()
     model  = settings.translation_model
 
-    response = client.messages.create(
-        model=model,
-        max_tokens=8096,
-        temperature=1,          # Anthropic khuyến nghị temp=1 cho Claude 3+
-        system=system_prompt,
-        messages=[
-            {"role": "user", "content": chapter_text}
-        ],
-    )
+    def _do():
+        return client.messages.create(
+            model=model,
+            max_tokens=8096,
+            temperature=1,          # Anthropic khuyến nghị temp=1 cho Claude 3+
+            system=system_prompt,
+            messages=[
+                {"role": "user", "content": chapter_text}
+            ],
+        )
+
+    response = _call_with_timeout(_do)
 
     # Log token usage
     if hasattr(response, "usage") and response.usage:
@@ -259,7 +282,7 @@ def call_anthropic_translation(system_prompt: str, chapter_text: str) -> str:
         _log_tokens(
             getattr(u, "input_tokens", "?"),
             getattr(u, "output_tokens", "?"),
-            "—",                # Anthropic không trả total riêng
+            "—",
         )
 
     # Extract text từ content blocks
@@ -276,14 +299,17 @@ def call_anthropic_translation(system_prompt: str, chapter_text: str) -> str:
 
 def call_gemini_text(system_prompt: str, user_text: str) -> str:
     """Scout, Arc Memory — plain text, luôn dùng Gemini."""
-    response = key_pool.current_client.models.generate_content(
-        model=settings.gemini_model,
-        contents=user_text,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            temperature=0.2,
-        ),
-    )
+    def _do():
+        return key_pool.current_client.models.generate_content(
+            model=settings.gemini_model,
+            contents=user_text,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.2,
+            ),
+        )
+
+    response = _call_with_timeout(_do)
     key_pool.on_success()
     return response.text or ""
 
@@ -291,17 +317,20 @@ def call_gemini_text(system_prompt: str, user_text: str) -> str:
 def call_gemini_json(system_prompt: str, user_text: str) -> dict:
     """
     Emotion Tracker, clean_glossary, Pre-call, Post-call — JSON tự do.
-    Luôn dùng Gemini (không dispatch sang Anthropic).
+    Luôn dùng Gemini.
     """
-    response = key_pool.current_client.models.generate_content(
-        model=settings.gemini_model,
-        contents=user_text,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            temperature=0.1,
-            response_mime_type="application/json",
-        ),
-    )
+    def _do():
+        return key_pool.current_client.models.generate_content(
+            model=settings.gemini_model,
+            contents=user_text,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.1,
+                response_mime_type="application/json",
+            ),
+        )
+
+    response = _call_with_timeout(_do)
     key_pool.on_success()
     raw   = response.text or "{}"
     clean = re.sub(r"^```json\s*|```\s*$", "", raw.strip(), flags=re.MULTILINE)
@@ -315,13 +344,11 @@ def call_gemini_json(system_prompt: str, user_text: str) -> dict:
 def is_rate_limit(exc: Exception) -> bool:
     msg = str(exc).lower()
     return any(k in msg for k in ("429", "rate limit", "quota", "resource_exhausted",
-                                   "overloaded", "529"))  # 529 = Anthropic overload
+                                   "overloaded", "529"))
 
 
 def handle_api_error(exc: Exception) -> None:
-    """Gọi từ pipeline khi gặp exception."""
     if is_rate_limit(exc):
-        # Chỉ rotate Gemini key pool — Anthropic dùng key đơn, không có pool
         if not settings.using_anthropic:
             key_pool.on_rate_limit()
 

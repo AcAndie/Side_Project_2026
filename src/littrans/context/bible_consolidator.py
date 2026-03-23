@@ -2,25 +2,37 @@
 src/littrans/context/bible_consolidator.py — Hợp nhất staging → 3 tầng chính.
 
 [Refactor] bible/ → context/. Imports: bible.* → context.*.
-"""
-# Nội dung giống hệt bible/bible_consolidator.py
-# CHỈ THAY ĐỔI 2 dòng import đầu:
 
+[FIX v1.1] FileLock retry + stale lock detection:
+  - Thêm _acquire_lock_with_retry(): retry 3 lần, mỗi lần 10s.
+  - Detect stale lock (file tồn tại nhưng quá 5 phút) → xóa và thử lại.
+  - Log rõ ràng khi staging bị giữ lại do lỗi lock.
+  - Không silently mất data khi consolidation fail.
+"""
 from __future__ import annotations
 
+import os
 import re
+import time
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from filelock import FileLock, Timeout
 
-from littrans.context.bible_store import BibleStore          # ← ĐỔI
-from littrans.context.schemas import (                        # ← ĐỔI
+from littrans.context.bible_store import BibleStore
+from littrans.context.schemas import (
     ScanOutput, ScanCandidate,
     BibleChapterSummary, BibleEvent, BiblePlotThread, BibleRevelation,
     ENTITY_MODELS,
 )
+
+
+# ── Cấu hình lock ─────────────────────────────────────────────────
+_LOCK_TIMEOUT_PER_ATTEMPT = 10    # giây mỗi lần thử
+_LOCK_RETRY_COUNT         = 3     # số lần retry
+_LOCK_STALE_MINUTES       = 5     # lock cũ hơn N phút → coi là stale
 
 
 # ── Result ────────────────────────────────────────────────────────
@@ -67,6 +79,67 @@ def _name_similarity(candidate: ScanCandidate, existing: dict) -> float:
     return best
 
 
+# ── Lock helpers ──────────────────────────────────────────────────
+
+def _is_stale_lock(lock_path: Path) -> bool:
+    """True nếu lock file tồn tại và cũ hơn _LOCK_STALE_MINUTES phút."""
+    if not lock_path.exists():
+        return False
+    try:
+        age_seconds = time.time() - lock_path.stat().st_mtime
+        return age_seconds > _LOCK_STALE_MINUTES * 60
+    except OSError:
+        return False
+
+
+def _acquire_lock_with_retry(lock_path: Path):
+    """
+    Thử acquire FileLock với retry + stale detection.
+
+    Strategy:
+      1. Nếu lock file là stale → xóa và thử ngay.
+      2. Retry tối đa _LOCK_RETRY_COUNT lần, mỗi lần timeout _LOCK_TIMEOUT_PER_ATTEMPT.
+      3. Raise RuntimeError nếu vẫn không được sau tất cả các lần thử.
+
+    Trả về FileLock context đã acquired (caller phải dùng với `with`).
+    """
+    lock = FileLock(str(lock_path))
+
+    for attempt in range(1, _LOCK_RETRY_COUNT + 1):
+        # Detect và xóa stale lock
+        if _is_stale_lock(lock_path):
+            logging.warning(
+                f"[Consolidator] Stale lock phát hiện ({lock_path.name}) — xóa và thử lại"
+            )
+            print(f"  ⚠️  Stale lock > {_LOCK_STALE_MINUTES}min → xóa và retry...")
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError as e:
+                logging.warning(f"[Consolidator] Không xóa được stale lock: {e}")
+
+        try:
+            lock.acquire(timeout=_LOCK_TIMEOUT_PER_ATTEMPT)
+            if attempt > 1:
+                print(f"  ✅ Lock acquired sau {attempt} lần thử")
+            return lock
+        except Timeout:
+            if attempt < _LOCK_RETRY_COUNT:
+                print(
+                    f"  ⏳ Lock bận ({attempt}/{_LOCK_RETRY_COUNT}) "
+                    f"— chờ {_LOCK_TIMEOUT_PER_ATTEMPT}s rồi thử lại..."
+                )
+                time.sleep(2)   # ngắn, vì timeout đã chờ _LOCK_TIMEOUT_PER_ATTEMPT
+            else:
+                raise RuntimeError(
+                    f"Không thể acquire consolidation lock sau "
+                    f"{_LOCK_RETRY_COUNT} lần × {_LOCK_TIMEOUT_PER_ATTEMPT}s = "
+                    f"{_LOCK_RETRY_COUNT * _LOCK_TIMEOUT_PER_ATTEMPT}s. "
+                    f"Staging được giữ lại — chạy lại `bible consolidate` để thử tiếp."
+                )
+    # unreachable
+    raise RuntimeError("Lock acquire failed unexpectedly")
+
+
 # ── Entity Resolver ───────────────────────────────────────────────
 
 class EntityResolver:
@@ -110,15 +183,35 @@ class BibleConsolidator:
         self._resolver = EntityResolver(store)
 
     def run(self, staging: list[ScanOutput]) -> ConsolidationResult:
+        """
+        Entry point. Acquire lock, chạy consolidation, release lock.
+
+        [FIX v1.1] Dùng _acquire_lock_with_retry() thay vì FileLock trực tiếp:
+          - Retry 3 lần × 10s = 30s tổng (giống timeout cũ nhưng có retry).
+          - Stale lock detection tránh bị kẹt do crash trước đó.
+          - Log rõ ràng staging bị giữ lại thay vì mất âm thầm.
+        """
         lock_path = self._store._dir / ".consolidate.lock"
+        lock      = None
         try:
-            with FileLock(str(lock_path), timeout=30):
-                return self._run_locked(staging)
-        except Timeout:
-            msg = "Không thể lấy consolidation lock sau 30s"
+            lock = _acquire_lock_with_retry(lock_path)
+            return self._run_locked(staging)
+        except RuntimeError as e:
+            msg = str(e)
             logging.error(f"[Consolidator] {msg}")
             print(f"  ⚠️  {msg}")
             return ConsolidationResult(errors=[msg])
+        except Exception as e:
+            msg = f"Consolidation lỗi không mong đợi: {e}"
+            logging.error(f"[Consolidator] {msg}")
+            print(f"  ❌ {msg}")
+            return ConsolidationResult(errors=[msg])
+        finally:
+            if lock is not None and lock.is_locked:
+                try:
+                    lock.release()
+                except Exception as e:
+                    logging.warning(f"[Consolidator] Release lock lỗi: {e}")
 
     def _run_locked(self, staging: list[ScanOutput]) -> ConsolidationResult:
         result = ConsolidationResult()
@@ -130,6 +223,7 @@ class BibleConsolidator:
                 msg = f"{scan_output.source_chapter}: {e}"
                 logging.error(f"[Consolidator] {msg}")
                 result.errors.append(msg)
+                print(f"  ⚠️  Consolidation lỗi [{scan_output.source_chapter}]: {e}")
         return result
 
     def _consolidate_one(self, scan: ScanOutput, result: ConsolidationResult) -> None:
