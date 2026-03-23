@@ -2,6 +2,7 @@
 src/littrans/core/pipeline.py — Điều phối pipeline dịch tuần tự.
 
 [v5.3] Phase 3 refactor: engine → core, managers → context, tools → cli.
+[v5.4] Multi-novel: dùng settings.active_input_dir / active_output_dir.
 """
 from __future__ import annotations
 
@@ -39,7 +40,6 @@ from littrans.llm.schemas import (
 # ── Pipeline data-parsing helpers ────────────────────────────────
 
 def _parse_list(raw: list, model_cls, label: str) -> list:
-    """Parse list[dict] → list[PydanticModel], bỏ qua item lỗi."""
     result = []
     for item in raw or []:
         if not isinstance(item, dict):
@@ -52,7 +52,6 @@ def _parse_list(raw: list, model_cls, label: str) -> list:
 
 
 def _parse_characters(raw: list) -> list:
-    """Parse list[dict] → list[CharacterDetail], handle how_refers_to_others dict→list."""
     result = []
     for c in raw or []:
         if not isinstance(c, dict) or not c.get("name"):
@@ -73,7 +72,6 @@ def _parse_characters(raw: list) -> list:
 
 
 def _parse_relationships(raw: list, fallback_chapter: str) -> list:
-    """Parse list[dict] → list[RelationshipUpdate], inject chapter nếu thiếu."""
     result = []
     for r in raw or []:
         if not isinstance(r, dict):
@@ -114,12 +112,17 @@ class Pipeline:
 
     def run(self) -> None:
         """Dịch tất cả chương chưa có bản dịch."""
-        if not settings.input_dir.exists():
-            print(f"❌ Không tìm thấy '{settings.input_dir}'."); return
+        # [v5.4] Dùng active_input_dir thay vì input_dir
+        if not settings.active_input_dir.exists():
+            print(f"❌ Không tìm thấy '{settings.active_input_dir}'.")
+            if settings.novel_name:
+                print(f"   Tạo folder: inputs/{settings.novel_name}/")
+            return
 
         all_files = self.sorted_inputs()
         if not all_files:
-            print(f"❌ Không có file nào trong '{settings.input_dir}'."); return
+            print(f"❌ Không có file nào trong '{settings.active_input_dir}'.")
+            return
 
         pending = self._get_pending(all_files)
         self._print_banner(all_files, pending)
@@ -173,9 +176,10 @@ class Pipeline:
             print(f"❌ Không tìm thấy '{filename}'."); return
 
         chapter_index = all_files.index(filename)
-        fp = str(settings.input_dir  / filename)
+        # [v5.4] Dùng active paths
+        fp = str(settings.active_input_dir  / filename)
         base, _  = os.path.splitext(filename)
-        op = str(settings.output_dir / f"{base}_VN.txt")
+        op = str(settings.active_output_dir / f"{base}_VN.txt")
 
         if os.path.exists(op):
             os.remove(op)
@@ -184,6 +188,8 @@ class Pipeline:
         print(f"\n{'═'*62}")
         print(f"  Retranslate — chương {chapter_index+1}/{len(all_files)}")
         print(f"  File: {filename}")
+        if settings.novel_name:
+            print(f"  Novel: {settings.novel_name}")
         print(f"  Cập nhật data: {'✅' if update_data else '❌'}")
         print(f"{'═'*62}\n")
 
@@ -315,12 +321,10 @@ class Pipeline:
                 )
                 translation = call_translation(system_prompt, input_text)
 
-                # Post-processor: 14-pass code cleanup TRƯỚC quality_check
                 translation, pp_changes = pp_run(translation)
                 if pp_changes:
                     print(pp_report(pp_changes))
 
-                # Mechanical quality check
                 ok_mech, mech_msg = quality_check(translation, text)
                 if not ok_mech:
                     print(f"  ⚠️  Lỗi cơ học ({attempt}/{max_trans}): {mech_msg}")
@@ -382,11 +386,9 @@ class Pipeline:
                 try:
                     input_text = f"⚠️ RETRY — {retry_instruction}\n\n---\n\n{text}"
                     final_translation = call_translation(system_prompt, input_text)
-
                     final_translation, pp_changes = pp_run(final_translation)
                     if pp_changes:
                         print(pp_report(pp_changes))
-
                     time.sleep(settings.post_call_sleep)
                 except Exception as e:
                     logging.error(f"{filename} | post retry trans | {e}")
@@ -406,6 +408,7 @@ class Pipeline:
             self._record_violations(violations, name_lock, filename)
 
         # ── Ghi file ──────────────────────────────────────────────
+        # [v5.4] out_filepath đã dùng active_output_dir từ _get_pending
         atomic_write(out_filepath, final_translation)
         print(f"  ✅ Dịch xong: {filename}")
 
@@ -428,33 +431,22 @@ class Pipeline:
 
     # ── Data update helpers ───────────────────────────────────────
 
-    def _update_data_from_post(
-        self,
-        post_result,
-        filename      : str,
-        chapter_index : int,
-        char_profiles : dict,
-    ) -> None:
-        """Update Master State từ metadata của Post-call."""
+    def _update_data_from_post(self, post_result, filename, chapter_index, char_profiles) -> None:
         term_objects = _parse_list(post_result.new_terms, TermDetail, "TermDetail")
         if term_objects:
             n = add_new_terms(term_objects, filename)
-            if n:
-                print(f"  📝 Thuật ngữ mới: {n}")
+            if n: print(f"  📝 Thuật ngữ mới: {n}")
 
         skill_objects = _parse_list(post_result.skill_updates, SkillUpdate, "SkillUpdate")
         if skill_objects:
             n = add_skill_updates(skill_objects, filename)
-            if n:
-                print(f"  ⚔️  Kỹ năng mới: {n}")
+            if n: print(f"  ⚔️  Kỹ năng mới: {n}")
 
         char_objects = _parse_characters(post_result.new_characters)
         rel_objects  = _parse_relationships(post_result.relationship_updates, filename)
 
         if char_objects or rel_objects:
-            n_chars, n_rels = update_from_response(
-                char_objects, rel_objects, filename, chapter_index,
-            )
+            n_chars, n_rels = update_from_response(char_objects, rel_objects, filename, chapter_index)
             if n_chars:
                 dest = "Active" if settings.immediate_merge else "Staging"
                 print(f"  👤 Nhân vật mới: {n_chars} → {dest}")
@@ -464,23 +456,26 @@ class Pipeline:
     # ── Helpers ───────────────────────────────────────────────────
 
     def sorted_inputs(self) -> list[str]:
-        if not settings.input_dir.exists():
+        """[v5.4] Scan active_input_dir thay vì input_dir."""
+        dir_ = settings.active_input_dir
+        if not dir_.exists():
             return []
-        files = [f for f in os.listdir(str(settings.input_dir)) if f.endswith((".txt", ".md"))]
+        files = [f for f in os.listdir(str(dir_)) if f.endswith((".txt", ".md"))]
         return sorted(files, key=lambda s: [
             int(t) if t.isdigit() else t.lower()
             for t in re.split(r"(\d+)", s)
         ])
 
     def _get_pending(self, all_files: list[str]) -> list[tuple]:
+        """[v5.4] Dùng active_input_dir và active_output_dir."""
         pending = []
         for i, fn in enumerate(all_files):
             base, _ = os.path.splitext(fn)
-            out = str(settings.output_dir / f"{base}_VN.txt")
+            out = str(settings.active_output_dir / f"{base}_VN.txt")
             if os.path.exists(out):
                 print(f"⏭️  Bỏ qua (đã dịch): {fn}")
             else:
-                pending.append((i, fn, str(settings.input_dir / fn), out))
+                pending.append((i, fn, str(settings.active_input_dir / fn), out))
         return pending
 
     def _retry_passes(self, failed: list) -> list:
@@ -522,22 +517,25 @@ class Pipeline:
                 print(f"\n💡 Có {n_staging} nhân vật mới. Chạy: python scripts/main.py clean characters --action merge")
 
     def _wait(self, exc: Exception, attempt: int) -> None:
+        import time as _time
         if is_rate_limit(exc):
             print(f"  ⚠️  Rate limit → chờ {settings.rate_limit_sleep}s...")
-            time.sleep(settings.rate_limit_sleep)
+            _time.sleep(settings.rate_limit_sleep)
         else:
             delay = min(10 * (2 ** (attempt - 1)), 120)
             print(f"  ⏳ Backoff {delay}s...")
-            time.sleep(delay)
+            _time.sleep(delay)
 
     def _wait_quality(self, attempt: int) -> None:
+        import time as _time
         delay = min(5 * attempt, 30)
         print(f"  ⏳ Chờ {delay}s trước khi retry...")
-        time.sleep(delay)
+        _time.sleep(delay)
 
-    def _record_violations(self, violations: list[str], name_lock: dict, filename: str) -> None:
+    def _record_violations(self, violations, name_lock, filename) -> None:
         from littrans.utils.io_utils import load_json, save_json as _save
-        fixes_path = settings.data_dir / "name_fixes.json"
+        # [v5.4] Lưu name_fixes vào novel_data_dir
+        fixes_path = settings.novel_data_dir / "name_fixes.json"
         data  = load_json(fixes_path) or {"fixes": {}}
         fixes = data.setdefault("fixes", {})
         for v in violations:
@@ -553,7 +551,7 @@ class Pipeline:
                 entry.setdefault("chapters", []).append(filename)
         _save(fixes_path, data)
 
-    def _print_banner(self, all_files: list[str], pending: list) -> None:
+    def _print_banner(self, all_files, pending) -> None:
         stats = character_stats()
         nl    = lock_stats()
         sk    = skills_stats()
@@ -563,10 +561,11 @@ class Pipeline:
             else f"{settings.budget_limit:,} token"
         )
         print(f"\n{'═'*62}")
-        trans_info  = translation_model_info()
-        gemini_info = settings.gemini_model
-        print(f"  Pipeline Dịch Truyện v5.3 — Trans: {trans_info}")
-        print(f"  Scout/Pre/Post             — Gemini: {gemini_info}")
+        print(f"  Pipeline Dịch Truyện v5.4 — Trans: {translation_model_info()}")
+        if settings.novel_name:
+            print(f"  Novel            : {settings.novel_name}")
+            print(f"  Input            : {settings.active_input_dir}")
+            print(f"  Output           : {settings.active_output_dir}")
         print(f"{'─'*62}")
         print(f"  Mode             : 3-call (pre+trans+post)")
         print(f"  Tổng chương      : {len(all_files)}")
@@ -583,7 +582,7 @@ class Pipeline:
         print(f"  Retry passes     : {settings.retry_failed_passes}")
         print(f"{'═'*62}\n")
 
-    def _print_summary(self, total_ok: int, total_fail: int, failed: list) -> None:
+    def _print_summary(self, total_ok, total_fail, failed) -> None:
         remaining = [fn for _, fn, _, op in failed if not os.path.exists(op)]
         kp = key_pool.stats()
         print(f"\n{'═'*62}")

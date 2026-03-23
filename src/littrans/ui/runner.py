@@ -3,6 +3,9 @@ src/littrans/ui/runner.py — Background pipeline runner.
 
 Captures stdout (tất cả print() trong pipeline) và đẩy vào Queue
 để UI có thể stream log theo thời gian thực.
+
+[v5.4] Thêm novel_name parameter — set_novel() trước khi chạy pipeline
+       trong background thread để đảm bảo đúng paths.
 """
 from __future__ import annotations
 
@@ -30,23 +33,27 @@ class _StdoutCapture(io.TextIOBase):
 
 
 def run_background(
-    log_queue: queue.Queue,
-    mode: str = "run",
-    filename: str = "",
-    update_data: bool = False,
-    force_scout: bool = False,
-    all_files: list[str] | None = None,
+    log_queue   : queue.Queue,
+    mode        : str = "run",
+    novel_name  : str = "",
+    filename    : str = "",
+    update_data : bool = False,
+    force_scout : bool = False,
+    all_files   : list[str] | None = None,
     chapter_index: int = 0,
-    char_action: str = "merge",
+    char_action : str = "merge",
 ) -> threading.Thread:
     """
     Chạy pipeline operation trong background thread.
 
-    mode:
-        "run"            — Pipeline().run()   (dịch tất cả chương chưa dịch)
-        "retranslate"    — Pipeline().retranslate(filename, update_data)
-        "clean_glossary" — clean_glossary()
-        "clean_chars"    — run_action(char_action)
+    Args:
+        novel_name: Tên novel hiện tại. Truyền vào để set_novel() trong thread,
+                    tránh race condition với UI thread.
+        mode:
+            "run"            — Pipeline().run()   (dịch tất cả chương chưa dịch)
+            "retranslate"    — Pipeline().retranslate(filename, update_data)
+            "clean_glossary" — clean_glossary()
+            "clean_chars"    — run_action(char_action)
     """
 
     def _worker() -> None:
@@ -59,26 +66,30 @@ def run_background(
                 if p not in sys.path:
                     sys.path.insert(0, p)
 
+            # [v5.4] Set novel trước khi làm bất cứ điều gì
+            if novel_name:
+                from littrans.config.settings import set_novel
+                set_novel(novel_name)
+
             if mode == "run":
-                from littrans.engine.pipeline import Pipeline
+                from littrans.core.pipeline import Pipeline
                 Pipeline().run()
 
             elif mode == "retranslate":
-                # Optional: chạy Scout trước
                 if force_scout and all_files:
-                    from littrans.engine.scout import run as scout_run
+                    from littrans.core.scout import run as scout_run
                     print(f"🔭 Chạy Scout trước khi dịch lại ({len(all_files)} chương)...")
                     scout_run(all_files, chapter_index)
 
-                from littrans.engine.pipeline import Pipeline
+                from littrans.core.pipeline import Pipeline
                 Pipeline().retranslate(filename, update_data=update_data)
 
             elif mode == "clean_glossary":
-                from littrans.tools.clean_glossary import clean_glossary
+                from littrans.cli.tool_clean_glossary import clean_glossary
                 clean_glossary()
 
             elif mode == "clean_chars":
-                from littrans.tools.clean_characters import run_action
+                from littrans.cli.tool_clean_chars import run_action
                 run_action(char_action)
 
         except SystemExit as exc:
