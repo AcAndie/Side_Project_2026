@@ -3,8 +3,8 @@ src/littrans/llm/client.py — Gemini API client + Multi-Key Pool + Anthropic di
 
 [v4.5] Dual-Model support.
 [v4.6] Timeout: API_TIMEOUT=90s + _call_with_timeout() wrapper.
-[FIX]  call_gemini_json: unwrap JSON array response → dict.
-       AI đôi khi trả về [{...}] thay vì {...} → gây lỗi 'list has no attribute get'.
+[v5.5] DUP-6 fix: token logging tập trung vào _try_log_usage().
+       DEAD-1 fix: xoá call_gemini() (structured-output flow cũ, không còn dùng).
 """
 from __future__ import annotations
 
@@ -48,6 +48,31 @@ def _call_with_timeout(fn, timeout: int = API_TIMEOUT):
                 f"API call timed out sau {timeout}s — "
                 "kiểm tra kết nối mạng hoặc tăng API_TIMEOUT trong client.py."
             )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TOKEN LOGGING HELPER
+# ═══════════════════════════════════════════════════════════════════
+
+def _try_log_usage(response) -> None:
+    """Ghi log token usage nếu response có usage_metadata (Gemini) hoặc usage (Anthropic)."""
+    # Gemini
+    if hasattr(response, "usage_metadata") and response.usage_metadata:
+        u = response.usage_metadata
+        _log_tokens(
+            getattr(u, "prompt_token_count", "?"),
+            getattr(u, "candidates_token_count", "?"),
+            getattr(u, "total_token_count", "?"),
+        )
+        return
+    # Anthropic
+    if hasattr(response, "usage") and response.usage:
+        u = response.usage
+        _log_tokens(
+            getattr(u, "input_tokens", "?"),
+            getattr(u, "output_tokens", "?"),
+            "—",
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -162,35 +187,6 @@ def translation_model_info() -> str:
 # PUBLIC CALL FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════
 
-def call_gemini(system_prompt: str, chapter_text: str) -> TranslationResult:
-    """Flow cũ — structured output → TranslationResult."""
-    def _do():
-        return key_pool.current_client.models.generate_content(
-            model=settings.gemini_model,
-            contents=chapter_text,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=0.4,
-                response_schema=GEMINI_SCHEMA,
-                response_mime_type="application/json",
-            ),
-        )
-
-    response = _call_with_timeout(_do)
-
-    if hasattr(response, "usage_metadata") and response.usage_metadata:
-        u = response.usage_metadata
-        _log_tokens(
-            getattr(u, "prompt_token_count", "?"),
-            getattr(u, "candidates_token_count", "?"),
-            getattr(u, "total_token_count", "?"),
-        )
-
-    result = _parse_response(response)
-    key_pool.on_success()
-    return result
-
-
 def call_gemini_translation(system_prompt: str, chapter_text: str) -> str:
     """Gemini Trans-call — plain text output."""
     model = (
@@ -210,14 +206,7 @@ def call_gemini_translation(system_prompt: str, chapter_text: str) -> str:
         )
 
     response = _call_with_timeout(_do)
-
-    if hasattr(response, "usage_metadata") and response.usage_metadata:
-        u = response.usage_metadata
-        _log_tokens(
-            getattr(u, "prompt_token_count", "?"),
-            getattr(u, "candidates_token_count", "?"),
-            getattr(u, "total_token_count", "?"),
-        )
+    _try_log_usage(response)
 
     text = response.text or ""
     if not text.strip():
@@ -242,14 +231,7 @@ def call_anthropic_translation(system_prompt: str, chapter_text: str) -> str:
         )
 
     response = _call_with_timeout(_do)
-
-    if hasattr(response, "usage") and response.usage:
-        u = response.usage
-        _log_tokens(
-            getattr(u, "input_tokens", "?"),
-            getattr(u, "output_tokens", "?"),
-            "—",
-        )
+    _try_log_usage(response)
 
     text = ""
     for block in response.content:
@@ -284,9 +266,8 @@ def call_gemini_json(system_prompt: str, user_text: str) -> dict:
     Emotion Tracker, clean_glossary, Pre-call, Post-call, Bible scan — JSON tự do.
     Luôn dùng Gemini.
 
-    [FIX] Xử lý trường hợp AI trả về JSON array thay vì object:
+    Xử lý trường hợp AI trả về JSON array thay vì object:
       - [...] với 1 dict element  → unwrap, trả về dict đó
-      - [...] với nhiều elements  → unwrap element đầu tiên là dict
       - [] hoặc không có dict     → trả về {}
     """
     def _do():
@@ -312,8 +293,6 @@ def call_gemini_json(system_prompt: str, user_text: str) -> dict:
         logging.error(f"[call_gemini_json] JSON parse lỗi: {e} | raw[:200]: {raw[:200]}")
         raise
 
-    # [FIX] AI đôi khi trả về JSON array thay vì object
-    # Ví dụ: [{...}] hoặc [{...}, {...}]
     if isinstance(data, list):
         for item in data:
             if isinstance(item, dict):
@@ -322,7 +301,6 @@ def call_gemini_json(system_prompt: str, user_text: str) -> dict:
                     "— unwrap lấy dict đầu tiên"
                 )
                 return item
-        # List rỗng hoặc không có dict nào
         logging.warning(
             f"[call_gemini_json] Response là list không có dict element: "
             f"{str(data)[:100]}"
@@ -348,34 +326,7 @@ def handle_api_error(exc: Exception) -> None:
             key_pool.on_rate_limit()
 
 
-# ═══════════════════════════════════════════════════════════════════
-# PRIVATE HELPERS
-# ═══════════════════════════════════════════════════════════════════
-
-def _parse_response(response) -> TranslationResult:
-    if response.parsed is not None:
-        p = response.parsed
-        if isinstance(p, TranslationResult) and p.translation.strip():
-            return p
-
-    raw  = response.text or ""
-    text = re.sub(r"^```json\s*|```\s*$", "", raw.strip(), flags=re.MULTILINE)
-
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"JSON không hợp lệ: {e}\n[300 ký đầu]: {raw[:300]}")
-
-    try:
-        result = TranslationResult.model_validate(data)
-    except ValidationError as e:
-        raise ValueError(f"Response không khớp schema: {e}")
-
-    if not result.translation.strip():
-        raise ValueError("Bản dịch rỗng sau parse.")
-
-    return result
-
+# ── Private helpers ───────────────────────────────────────────────
 
 def _log_tokens(inp, out, total) -> None:
     try:

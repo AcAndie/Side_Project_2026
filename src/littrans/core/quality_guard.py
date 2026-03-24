@@ -1,5 +1,5 @@
 """
-src/littrans/engine/quality_guard.py — Kiểm tra chất lượng bản dịch.
+src/littrans/core/quality_guard.py — Kiểm tra chất lượng bản dịch.
 
 7 tiêu chí (thêm system_box so với v4.2):
   1. Dính dòng nghiêm trọng  → dòng vượt MAX_LINE_LENGTH ký tự
@@ -8,9 +8,12 @@ src/littrans/engine/quality_guard.py — Kiểm tra chất lượng bản dịch
   4. Thiếu dòng trống        → blank_ratio < MIN_BLANK_LINE_RATIO
   5. Bản dịch quá ngắn       → char_ratio < MIN_CHAR_RATIO
   6. Còn nhiều dòng tiếng Anh chưa dịch
-  7. [MỚI] System box có dòng trống thừa GIỮA các dòng nội dung
+  7. System box có dòng trống thừa GIỮA các dòng nội dung
 
 Trả về (True, "") nếu ổn, (False, mô_tả_lỗi) nếu phát hiện vấn đề.
+
+Lưu ý: build_retry_prompt() đã được xoá (STYLE-2/DEAD-2).
+       Pipeline tạo retry instruction trực tiếp từ mech_msg trong pipeline.py.
 """
 from __future__ import annotations
 
@@ -31,10 +34,6 @@ MAX_UNTRANSLATED_RATIO = 0.15
 def _check_system_box_blanks(translation: str) -> tuple[bool, str]:
     """
     Kiểm tra dòng trống thừa TRONG system box.
-
-    Thuật toán: nhận diện box bằng ký tự border (─ ═ ...).
-    Khi inside_box=True, dòng trống tiếp theo sau nội dung là lỗi.
-
     Trả về (True, "") nếu ổn.
     """
     lines   = translation.splitlines()
@@ -42,21 +41,16 @@ def _check_system_box_blanks(translation: str) -> tuple[bool, str]:
     issues  = 0
     example = ""
 
-    prev_was_content = False  # dòng trước là nội dung box (không phải border)
-
     for i, line in enumerate(lines):
         stripped = line.strip()
         is_border = bool(_BOX_BORDER_RE.search(stripped)) and len(stripped) >= 3
 
         if is_border:
-            in_box           = True
-            prev_was_content = False
+            in_box = True
             continue
 
         if in_box:
             if not stripped:
-                # Dòng trống trong box sau nội dung → lỗi nếu còn nội dung box tiếp theo
-                # Look ahead
                 for j in range(i + 1, min(i + 5, len(lines))):
                     next_s = lines[j].strip()
                     if next_s and (_BOX_CONTENT_RE.match(next_s)
@@ -67,12 +61,9 @@ def _check_system_box_blanks(translation: str) -> tuple[bool, str]:
                             example = f"«{lines[i - 1].strip()[:40]}» ← dòng trống thừa"
                         break
                     elif next_s:
-                        # Dòng tiếp theo là văn thường → kết thúc box
                         in_box = False
                         break
             else:
-                prev_was_content = True
-                # Nếu rời xa box (đoạn văn thường > 100 chars) → thoát box
                 if len(stripped) > 100 and not _BOX_CONTENT_RE.match(stripped):
                     in_box = False
 
@@ -193,47 +184,3 @@ def check(translation: str, source_text: str = "") -> tuple[bool, str]:
             return False, box_msg
 
     return True, ""
-
-
-# ── Retry prompt ──────────────────────────────────────────────────
-
-def build_retry_prompt(original_text: str, quality_msg: str) -> str:
-    """Tạo input text có gắn cảnh báo khi yêu cầu AI dịch lại."""
-    if "DÍNH DÒNG" in quality_msg or "THIẾU DÒNG TRỐNG" in quality_msg:
-        specific = (
-            "  • TUYỆT ĐỐI KHÔNG gộp nhiều đoạn thành một dòng\n"
-            "  • Mỗi đoạn văn gốc = MỘT đoạn văn trong bản dịch\n"
-            "  • Sau mỗi đoạn văn PHẢI có đúng 1 dòng trống\n"
-            "  • Đối thoại mỗi lượt thoại = 1 đoạn + 1 dòng trống\n"
-        )
-    elif "QUÁ NGẮN" in quality_msg:
-        specific = (
-            "  • KHÔNG bỏ qua bất kỳ đoạn văn, câu, hay hội thoại nào\n"
-            "  • Dịch ĐẦY ĐỦ 100% nội dung, không tóm tắt hay rút gọn\n"
-            "  • Mỗi đoạn gốc phải có đoạn dịch tương ứng\n"
-        )
-    elif "CHƯA DỊCH" in quality_msg:
-        specific = (
-            "  • Dịch TẤT CẢ các dòng tiếng Anh sang tiếng Việt\n"
-            "  • Chỉ giữ nguyên tên riêng đã có trong Name Lock Table\n"
-            "  • Hội thoại, mô tả, kỹ năng — tất cả phải được dịch\n"
-        )
-    elif "SYSTEM BOX" in quality_msg:
-        specific = (
-            "  • Nội dung trong system box / bảng hệ thống PHẢI liền nhau\n"
-            "  • KHÔNG có dòng trống giữa các dòng trong box (─═│▸◆ ...)\n"
-            "  • Chỉ có 1 dòng trống TRƯỚC và SAU box để phân tách với đoạn văn thường\n"
-        )
-    else:
-        specific = (
-            "  • GIỮ NGUYÊN cấu trúc đoạn văn của bản gốc\n"
-            "  • Xuống dòng và dòng trống đúng như bản gốc\n"
-        )
-
-    return (
-        f"⚠️ CẢNH BÁO: Bản dịch lần trước bị lỗi — {quality_msg}\n\n"
-        f"Hãy dịch lại TOÀN BỘ chương dưới đây, đảm bảo:\n"
-        f"{specific}"
-        f"  • Số dòng bản dịch phải xấp xỉ số dòng bản gốc\n\n"
-        f"--- NỘI DUNG GỐC ---\n\n{original_text}"
-    )

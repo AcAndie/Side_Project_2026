@@ -1,5 +1,5 @@
 """
-src/littrans/utils/post_processor.py — 14-pass code-only cleanup sau Trans-call.
+src/littrans/core/post_processor.py — 14-pass code-only cleanup sau Trans-call.
 
 Chạy NGAY SAU khi nhận output từ LLM, TRƯỚC khi ghi file và TRƯỚC Post-call.
 Không dùng AI — thuần regex/string để tránh hallucination và tiết kiệm token.

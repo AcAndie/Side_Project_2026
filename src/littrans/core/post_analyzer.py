@@ -1,5 +1,5 @@
 """
-src/littrans/engine/post_analyzer.py — Post-call: review + extract metadata.
+src/littrans/core/post_analyzer.py — Post-call: review + extract metadata.
 
 Chạy SAU Translation call + SAU post_processor.run(). Làm 2 việc:
   1. Đánh giá chất lượng bản dịch (đã được code-cleanup):
@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from littrans.config.settings import settings
+from littrans.utils.io_utils import safe_list
 
 
 # ── Output schema ─────────────────────────────────────────────────
@@ -28,7 +29,7 @@ from littrans.config.settings import settings
 @dataclass
 class QualityIssue:
     type      : str   # format | structure | name_leak | pronoun | style | missing
-    severity  : str   # warn | retry_required  (không còn "auto_fix" — đã xử lý bởi post_processor)
+    severity  : str   # warn | retry_required
     location  : str   # trích đoạn ngắn nơi xảy ra lỗi
     detail    : str   # mô tả lỗi
 
@@ -70,9 +71,9 @@ Bạn nhận được:
   2. Bản dịch tiếng Việt (đã qua code cleanup cơ bản)
   3. Chapter Map (tên/skill/pronoun đã lock cho chapter này)
 
-═══════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════
 NHIỆM VỤ 1 — ĐÁNH GIÁ CHẤT LƯỢNG
-═══════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════
 Lưu ý: Bản dịch đã qua code cleanup (dấu câu, dòng trống, code block wrapper).
 Chỉ báo cáo các lỗi mà code KHÔNG thể tự sửa:
 
@@ -92,9 +93,9 @@ KHÔNG báo cáo:
   - Dấu câu, dòng trống, code block — đã được xử lý tự động
   - Lỗi spacing thông thường
 
-═══════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════
 NHIỆM VỤ 2 — EXTRACT METADATA ĐẦY ĐỦ
-═══════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════
 Đọc bản gốc + bản dịch, extract chính xác.
 
 ── new_characters ──────────────────────────────────────────
@@ -131,14 +132,7 @@ Quy tắc relationships.intimacy_level:
   4 = CLOSE (rất thân, nickname, bỏ kính ngữ)
   5 = INTIMATE (yêu/gia đình gần gũi, ngôn ngữ đặc biệt)
 
-Quy tắc relationships.eps_signals:
-  Liệt kê các dấu hiệu cụ thể về mức độ thân mật:
-  - Có dùng nickname hay không
-  - Bỏ kính ngữ từ lúc nào
-  - Độ dài câu khi nói chuyện (ngắn/dài)
-  - Chia sẻ cảm xúc trực tiếp hay không
-
-═══════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════
 
 Trả về JSON. KHÔNG thêm bất cứ thứ gì ngoài JSON:
 {
@@ -155,86 +149,10 @@ Trả về JSON. KHÔNG thêm bất cứ thứ gì ngoài JSON:
     "retry_instruction": ""
   },
   "metadata": {
-    "new_terms": [
-      {
-        "english": "tên/thuật ngữ EN",
-        "vietnamese": "bản dịch VN",
-        "category": "general|items|locations|organizations|pathways"
-      }
-    ],
-    "new_characters": [
-      {
-        "name": "tên gốc EN — dùng làm key",
-        "canonical_name": "tên VN chuẩn",
-        "alias_canonical_map": { "alias_EN": "alias_VN" },
-        "full_name": "",
-        "aliases": [],
-        "active_identity": "",
-        "identity_context": "",
-        "current_title": "",
-        "faction": "",
-        "cultivation_path": "",
-        "current_level": "",
-        "signature_skills": [],
-        "combat_style": "",
-        "role": "MC|Party Member|Enemy|NPC|Mentor|Rival|Love Interest|Antagonist|Unknown",
-        "archetype": "MC_GREMLIN|SYSTEM_AI|EDGELORD|ARROGANT_NOBLE|BRO_COMPANION|ANCIENT_MAGE|UNKNOWN",
-        "personality_traits": [
-          "trait 1 — câu đủ ngữ cảnh",
-          "trait 2 — câu đủ ngữ cảnh"
-        ],
-        "pronoun_self": "Tao|Ta|Tôi|...",
-        "formality_level": "low|medium-low|medium|medium-high|high",
-        "formality_note": "",
-        "how_refers_to_others": [
-          { "target": "tên cụ thể hoặc default_ally/default_enemy", "style": "đại từ + ngữ cảnh" }
-        ],
-        "speech_quirks": [],
-        "relationships": [
-          {
-            "with_character": "tên nhân vật kia",
-            "rel_type": "ally|enemy|neutral|romantic|family|mentor|rival",
-            "feeling": "cảm xúc hiện tại",
-            "dynamic": "Tao/Mày",
-            "pronoun_status": "weak|strong",
-            "intimacy_level": 2,
-            "eps_signals": ["dấu hiệu 1", "dấu hiệu 2"],
-            "current_status": "mô tả trạng thái",
-            "tension_points": [],
-            "history": []
-          }
-        ],
-        "relationship_to_mc": "",
-        "current_goal": "",
-        "hidden_goal": "",
-        "current_conflict": ""
-      }
-    ],
-    "relationship_updates": [
-      {
-        "character_a": "tên nhân vật A",
-        "character_b": "tên nhân vật B",
-        "event": "mô tả sự kiện",
-        "new_type": "",
-        "new_feeling": "",
-        "new_status": "",
-        "new_dynamic": "",
-        "new_tension": "",
-        "new_intimacy_level": 0,
-        "new_eps_signals": [],
-        "promote_to_strong": false
-      }
-    ],
-    "skill_updates": [
-      {
-        "english": "tên kỹ năng EN",
-        "vietnamese": "[Tên Kỹ Năng VN]",
-        "owner": "",
-        "skill_type": "active|passive|ultimate|evolution|system",
-        "evolved_from": "",
-        "description": ""
-      }
-    ]
+    "new_terms": [],
+    "new_characters": [],
+    "relationship_updates": [],
+    "skill_updates": []
   }
 }"""
 
@@ -339,14 +257,10 @@ def _parse(data: dict, original_translation: str, filename: str) -> PostResult:
         passed               = passed,
         issues               = issues,
         retry_instruction    = retry,
-        new_terms            = _safe_list(metadata.get("new_terms")),
-        new_characters       = _safe_list(metadata.get("new_characters")),
-        relationship_updates = _safe_list(metadata.get("relationship_updates")),
-        skill_updates        = _safe_list(metadata.get("skill_updates")),
+        new_terms            = safe_list(metadata.get("new_terms")),
+        new_characters       = safe_list(metadata.get("new_characters")),
+        relationship_updates = safe_list(metadata.get("relationship_updates")),
+        skill_updates        = safe_list(metadata.get("skill_updates")),
         ok                   = True,
         auto_fixed           = False,
     )
-
-
-def _safe_list(v: Any) -> list:
-    return v if isinstance(v, list) else []

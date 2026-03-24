@@ -1,5 +1,5 @@
 """
-src/littrans/managers/glossary.py — Glossary phân category + Aho-Corasick filter.
+src/littrans/context/glossary.py — Glossary phân category + Aho-Corasick filter.
 
 5 file category + 1 staging:
   Glossary_Pathways.md      Glossary_Organizations.md   Glossary_Items.md

@@ -2,6 +2,10 @@
 src/littrans/utils/io_utils.py — Đọc/ghi file an toàn.
 
 Atomic write (tempfile → os.replace) tránh corrupt khi bị kill giữa chừng.
+
+Helpers:
+  safe_list(v)  → v nếu là list, ngược lại []
+  safe_dict(v)  → v nếu là dict, ngược lại {}
 """
 from __future__ import annotations
 
@@ -33,6 +37,16 @@ def load_json(filepath: str | Path) -> dict:
 
 def save_json(filepath: str | Path, data: dict) -> None:
     atomic_write(str(filepath), json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def safe_list(v) -> list:
+    """Trả về v nếu là list, ngược lại trả về []."""
+    return v if isinstance(v, list) else []
+
+
+def safe_dict(v) -> dict:
+    """Trả về v nếu là dict, ngược lại trả về {}."""
+    return v if isinstance(v, dict) else {}
 
 
 def atomic_write(filepath: str | Path, content: str) -> None:

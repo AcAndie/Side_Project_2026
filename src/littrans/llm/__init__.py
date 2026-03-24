@@ -1,5 +1,4 @@
 from .client import (                          # noqa: F401
-    call_gemini,
     call_gemini_text,
     call_gemini_json,
     call_gemini_translation,

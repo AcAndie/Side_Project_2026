@@ -1,5 +1,5 @@
 """
-src/littrans/utils/text_normalizer.py — Chuẩn hóa raw text trước khi dịch.
+src/littrans/core/text_normalizer.py — Chuẩn hóa raw text trước khi dịch.
 
 Xử lý các vấn đề phổ biến của raw LitRPG / Tu Tiên text:
   ① Câu bị cắt giữa chừng (mid-sentence line break)

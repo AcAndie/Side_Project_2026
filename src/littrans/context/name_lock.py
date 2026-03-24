@@ -1,5 +1,5 @@
 """
-src/littrans/managers/name_lock.py — Bảng Name Lock: chốt tên nhất quán.
+src/littrans/context/name_lock.py — Bảng Name Lock: chốt tên nhất quán.
 
 Nguồn tên (ưu tiên từ cao → thấp):
   1. Characters_Active + Archive → canonical_name + alias_canonical_map

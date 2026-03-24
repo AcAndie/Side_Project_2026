@@ -1,5 +1,5 @@
 """
-src/littrans/bible/schemas.py — Pydantic schemas cho 3 tầng Bible System.
+src/littrans/context/schemas.py — Pydantic schemas cho 3 tầng Bible System.
 
 Tầng 1 — Database:
   BibleCharacter, BibleItem, BibleLocation, BibleSkill, BibleFaction, BibleConcept

@@ -1,5 +1,5 @@
 """
-src/littrans/managers/base.py — BaseManager: skeleton chung cho JSON-backed managers.
+src/littrans/context/base.py — BaseManager: skeleton chung cho JSON-backed managers.
 
 Cung cấp:
   - Thread-safe load/save qua self._lock

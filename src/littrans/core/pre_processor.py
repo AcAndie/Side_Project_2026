@@ -1,5 +1,5 @@
 """
-src/littrans/engine/pre_processor.py — Pre-call: chuẩn bị "bản đồ" cho chapter.
+src/littrans/core/pre_processor.py — Pre-call: chuẩn bị "bản đồ" cho chapter.
 
 Chạy TRƯỚC Translation call, mỗi chương 1 lần.
 Nhiệm vụ:
@@ -16,7 +16,7 @@ import logging
 from dataclasses import dataclass, field
 
 from littrans.config.settings import settings
-from littrans.utils.io_utils import load_json
+from littrans.utils.io_utils import load_json, safe_list, safe_dict
 
 
 # ── Output schema ─────────────────────────────────────────────────
@@ -169,7 +169,6 @@ def _build_user_message(
         parts.append(f"## SKILLS ĐÃ BIẾT\n{skill_lines}")
 
     # 4. Chapter text — giới hạn để tiết kiệm tokens
-    # Pre-call không cần đọc từng chữ, chỉ cần đủ để nhận diện tên/skill
     MAX_CHAPTER_CHARS = 12_000
     chapter_preview = chapter_text[:MAX_CHAPTER_CHARS]
     if len(chapter_text) > MAX_CHAPTER_CHARS:
@@ -182,17 +181,9 @@ def _build_user_message(
 def _parse(data: dict) -> ChapterMap:
     """Parse JSON từ AI → ChapterMap, tolerant với field thiếu."""
     return ChapterMap(
-        active_names  = _safe_dict(data.get("active_names")),
-        active_skills = _safe_dict(data.get("active_skills")),
-        pronoun_pairs = _safe_list(data.get("pronoun_pairs")),
-        scene_warnings= _safe_list(data.get("scene_warnings")),
+        active_names  = safe_dict(data.get("active_names")),
+        active_skills = safe_dict(data.get("active_skills")),
+        pronoun_pairs = safe_list(data.get("pronoun_pairs")),
+        scene_warnings= safe_list(data.get("scene_warnings")),
         ok            = True,
     )
-
-
-def _safe_dict(v) -> dict:
-    return v if isinstance(v, dict) else {}
-
-
-def _safe_list(v) -> list:
-    return v if isinstance(v, list) else []

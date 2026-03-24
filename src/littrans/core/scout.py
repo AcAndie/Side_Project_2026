@@ -2,7 +2,9 @@
 src/littrans/core/scout.py — Scout AI.
 
 [v4.4] Thêm _suggest_new_terms() — Scout Glossary Suggest.
-[Refactor] engine → core, managers → context.
+[v5.3] Refactor: engine → core, managers → context.
+[v5.5] DUP-3 fix: load_context_notes() đã chuyển về context/memory.py.
+       Import từ đó khi cần. Không còn bản trùng ở đây.
 """
 from __future__ import annotations
 
@@ -11,6 +13,9 @@ import logging
 
 from littrans.config.settings import settings
 from littrans.utils.io_utils import load_text, atomic_write, load_json, save_json
+
+# Re-export để các caller cũ (pipeline.py) không cần đổi import
+from littrans.context.memory import load_context_notes  # noqa: F401
 
 _SCOUT_SYSTEM = """Bạn là Scout AI — đọc trước các chương truyện để sinh ghi chú hỗ trợ AI dịch.
 
@@ -130,10 +135,6 @@ def run(all_files: list[str], current_index: int) -> None:
 
 def should_refresh(chapters_done: int) -> bool:
     return chapters_done % settings.scout_refresh_every == 0
-
-
-def load_context_notes() -> str:
-    return load_text(settings.context_notes_file)
 
 
 # ── Context Notes ─────────────────────────────────────────────────
