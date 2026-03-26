@@ -665,13 +665,14 @@ def _handle_crossref_log(S: Any) -> None:
 
 def _render_export(S: Any) -> None:
     import streamlit as st
-
+ 
     st.markdown("### ⬇️ Export Bible")
-
+ 
     fmt   = st.selectbox(
         "Định dạng",
         ["markdown", "json", "timeline", "characters", "consistency"],
         key="exp_fmt",
+        help="markdown: báo cáo dạng văn bản · json: dữ liệu thô · timeline: dòng thời gian sự kiện",
     )
     scope = st.selectbox(
         "Phạm vi (chỉ cho markdown)",
@@ -679,8 +680,9 @@ def _render_export(S: Any) -> None:
         key="exp_scope",
         disabled=(fmt != "markdown"),
     )
-
-    if st.button("🔄 Tạo export", type="primary", key="exp_run"):
+ 
+    col_btn, col_status = st.columns([1, 3])
+    if col_btn.button("🔄 Tạo export", type="primary", key="exp_run"):
         try:
             from littrans.bible.bible_exporter import BibleExporter
             from pathlib import Path
@@ -695,7 +697,7 @@ def _render_export(S: Any) -> None:
                 "consistency": "bible_consistency.md",
             }
             out = out_dir / fname_map[fmt]
-
+ 
             if fmt == "markdown":
                 exp.export_markdown(out, scope)
             elif fmt == "json":
@@ -708,20 +710,26 @@ def _render_export(S: Any) -> None:
                 from littrans.bible.cross_reference import CrossReferenceEngine
                 report = CrossReferenceEngine(store).run()
                 exp.export_consistency_report(out, report)
-
-            S.bible_export_done = True
-
-            # Download button
-            if out.exists():
-                content = out.read_text(encoding="utf-8")
-                st.download_button(
-                    label=f"⬇️ Tải {out.name}",
-                    data=content.encode("utf-8"),
-                    file_name=out.name,
-                    mime="text/plain",
-                    key="exp_download",
-                )
-                st.success(f"✅ Đã tạo: {out}")
-
+ 
+            # FIX: Store file path in session state so download button persists across reruns
+            S.last_export_file = str(out)
+            col_status.success(f"✅ Đã tạo: {out}")
+ 
         except Exception as e:
-            st.error(f"❌ Export lỗi: {e}")
+            col_status.error(f"❌ Export lỗi: {e}")
+            S.last_export_file = None
+ 
+    # FIX: Download button rendered outside the trigger button block
+    # — persists across reruns because it reads from session state
+    if S.get("last_export_file"):
+        from pathlib import Path
+        export_path = Path(S.last_export_file)
+        if export_path.exists():
+            content = export_path.read_text(encoding="utf-8")
+            st.download_button(
+                label=f"⬇️ Tải xuống {export_path.name}",
+                data=content.encode("utf-8"),
+                file_name=export_path.name,
+                mime="text/plain",
+                key="exp_download_persistent",
+            )

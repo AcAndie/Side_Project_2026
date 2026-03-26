@@ -1,11 +1,18 @@
 """
 src/littrans/ui/app.py — LiTTrans Web UI (Streamlit)
 
-[v5.4] Multi-novel:
-  - Novel selector trong sidebar (selectbox từ inputs/)
-  - Khi đổi novel → set_novel() + clear cache
-  - load_chapters(novel_name) nhận arg để cache đúng
-  - run_background() được truyền novel_name
+[v5.5] UX overhaul:
+  - Welcome/onboarding screen for first-time users
+  - Quick Setup in Settings (API key only, no tech jargon)
+  - Fixed cache keys: load_stats/load_characters/load_glossary_data
+    now include novel_name to prevent stale data on novel switch
+  - Better empty states with step-by-step guidance
+  - Contextual help throughout
+  - Cleaner navigation labels
+
+[Bug fixes]
+  - load_stats/load_characters/load_glossary_data: add novel_name cache key
+  - Regex mismatch in _record_violations fixed in pipeline.py (separate patch)
 """
 from __future__ import annotations
 
@@ -29,7 +36,7 @@ from littrans.ui.epub_ui import render_epub_tab as render_epub
 import streamlit.components.v1 as components
 
 st.set_page_config(
-    page_title="LiTTrans",
+    page_title="LiTTrans — Dịch Truyện Tự Động",
     page_icon="📖",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -52,9 +59,7 @@ _DEFAULTS: dict[str, Any] = {
     "clean_q"       : None,
     "clean_logs"    : [],
     "settings_saved": False,
-    # Multi-novel
     "current_novel" : "",
-    # Bible System
     "bible_scan_running"    : False,
     "bible_scan_q"          : None,
     "bible_scan_logs"       : [],
@@ -62,10 +67,13 @@ _DEFAULTS: dict[str, Any] = {
     "bible_crossref_q"      : None,
     "bible_crossref_logs"   : [],
     "bible_export_done"     : False,
-    # epub
     "epub_running"          : False,
     "epub_q"                : None,
     "epub_logs"             : [],
+    # UX state
+    "show_advanced_settings": False,
+    "onboarding_done"       : False,
+    "last_export_file"      : None,   # for persistent download button
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -76,6 +84,7 @@ S = st.session_state
 # ── CSS ───────────────────────────────────────────────────────────
 st.markdown("""
 <style>
+/* Badges */
 .badge { display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;margin:1px; }
 .badge-ok   { background:#EAF3DE;color:#3B6D11; }
 .badge-warn { background:#FAEEDA;color:#633806; }
@@ -85,6 +94,50 @@ st.markdown("""
 .novel-pill { display:inline-block;background:#EEEDFE;color:#3C3489;font-size:12px;font-weight:600;padding:3px 10px;border-radius:99px; }
 .strong-lock { color:#3B6D11;font-size:11px; }
 .weak-lock   { color:#BA7517;font-size:11px; }
+
+/* Welcome card */
+.welcome-card {
+    background: linear-gradient(135deg, #EEEDFE 0%, #E6F1FB 100%);
+    border-radius: 16px;
+    padding: 32px;
+    margin-bottom: 24px;
+    border: 1px solid #d0cef8;
+}
+
+/* Step card */
+.step-card {
+    background: white;
+    border-radius: 12px;
+    padding: 20px;
+    border: 1px solid #e8e8e8;
+    height: 100%;
+}
+.step-num {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    background: #3C3489;
+    color: white;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 14px;
+    margin-bottom: 8px;
+}
+
+/* Progress step */
+.progress-step-done   { color: #3B6D11; font-weight: 600; }
+.progress-step-active { color: #3C3489; font-weight: 600; }
+.progress-step-todo   { color: #aaa; }
+
+/* Quick setup highlight */
+.quick-setup-box {
+    background: #FFF9F0;
+    border: 2px solid #EF9F27;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -108,11 +161,14 @@ def _save_env(updates: dict[str, str]) -> None:
     except Exception as exc:
         raise RuntimeError(f"Không thể lưu .env: {exc}") from exc
 
+def _has_api_key() -> bool:
+    env = _load_env()
+    return bool(env.get("GEMINI_API_KEY", "").strip())
+
 
 # ── Novel helpers ─────────────────────────────────────────────────
 
 def _get_available_novels() -> list[str]:
-    """Scan inputs/ tìm subfolder chứa .txt/.md = novel."""
     try:
         from littrans.config.settings import get_available_novels
         return get_available_novels()
@@ -126,9 +182,7 @@ def _get_available_novels() -> list[str]:
             and any(f.suffix in (".txt", ".md") for f in d.iterdir())
         ])
 
-
 def _apply_novel(name: str) -> None:
-    """Set novel trong settings và clear tất cả cache liên quan."""
     from littrans.config.settings import set_novel
     set_novel(name)
     load_chapters.clear()
@@ -137,11 +191,10 @@ def _apply_novel(name: str) -> None:
     load_glossary_data.clear()
 
 
-# ── Cached data loaders ───────────────────────────────────────────
+# ── Cached data loaders (BUG FIX: novel_name as cache key for all) ─
 
 @st.cache_data(ttl=10)
 def load_chapters(novel_name: str = "") -> list[dict]:
-    """[v5.4] novel_name là cache key — đổi novel → cache khác."""
     try:
         from littrans.config.settings import settings
         input_dir  = settings.active_input_dir
@@ -190,7 +243,7 @@ def load_chapter_content(path_str: str, vn_path_str: str, done: bool) -> dict[st
 
 
 @st.cache_data(ttl=4)
-def load_characters() -> dict[str, dict]:
+def load_characters(novel_name: str = "") -> dict[str, dict]:  # FIX: added novel_name
     try:
         from littrans.context.characters import load_active, load_archive
         return {
@@ -202,7 +255,7 @@ def load_characters() -> dict[str, dict]:
 
 
 @st.cache_data(ttl=4)
-def load_glossary_data() -> dict[str, list[tuple[str, str]]]:
+def load_glossary_data(novel_name: str = "") -> dict[str, list[tuple[str, str]]]:  # FIX: added novel_name
     try:
         from littrans.context.glossary import _load_all
         raw = _load_all()
@@ -223,7 +276,7 @@ def load_glossary_data() -> dict[str, list[tuple[str, str]]]:
 
 
 @st.cache_data(ttl=5)
-def load_stats() -> dict:
+def load_stats(novel_name: str = "") -> dict:  # FIX: added novel_name
     try:
         from littrans.context.characters import character_stats
         from littrans.context.glossary   import glossary_stats
@@ -347,6 +400,112 @@ def _show_log(logs: list[str], height: int = 200) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════
+# WELCOME SCREEN — hiện khi chưa có API key
+# ══════════════════════════════════════════════════════════════════
+
+def render_welcome() -> None:
+    """Hướng dẫn cài đặt lần đầu — chỉ hiện khi chưa có API key."""
+    st.markdown("""
+    <div class="welcome-card">
+        <h2 style="margin:0 0 8px 0">👋 Chào mừng đến với LiTTrans!</h2>
+        <p style="color:#555;margin:0;font-size:15px">
+            Dịch truyện LitRPG / Tu Tiên tự động từ tiếng Anh sang tiếng Việt.<br>
+            Nhất quán tên nhân vật, xưng hô và kỹ năng từ đầu đến cuối.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### Bắt đầu trong 3 bước đơn giản")
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.markdown("""
+        <div class="step-card">
+            <div class="step-num">1</div>
+            <h4>🔑 Lấy API Key</h4>
+            <p style="color:#555;font-size:13px">
+                Truy cập <b>aistudio.google.com</b>, đăng nhập bằng tài khoản Google
+                rồi nhấn <b>Get API key → Create API key</b>.
+                <br><br>
+                Miễn phí, không cần thẻ tín dụng.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with c2:
+        st.markdown("""
+        <div class="step-card">
+            <div class="step-num">2</div>
+            <h4>⚙️ Nhập API Key</h4>
+            <p style="color:#555;font-size:13px">
+                Dán API Key vào ô bên dưới và nhấn <b>Lưu</b>.
+                <br><br>
+                API Key có dạng <code>AIzaSy...</code>
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with c3:
+        st.markdown("""
+        <div class="step-card">
+            <div class="step-num">3</div>
+            <h4>📄 Upload chương và dịch</h4>
+            <p style="color:#555;font-size:13px">
+                Vào tab <b>📄 Dịch</b>, upload file <code>.txt</code> hoặc <code>.md</code>
+                của các chương, rồi nhấn <b>▶ Chạy pipeline</b>.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # Quick API key setup
+    st.markdown("### Nhập API Key của bạn")
+    st.markdown(
+        "Chưa có API key? [Lấy miễn phí tại đây →](https://aistudio.google.com) "
+        "(cần tài khoản Google)",
+        unsafe_allow_html=False,
+    )
+
+    col_key, col_btn = st.columns([4, 1])
+    api_key = col_key.text_input(
+        "Gemini API Key",
+        type="password",
+        placeholder="AIzaSy...",
+        label_visibility="collapsed",
+        help="API key từ Google AI Studio. Bắt đầu bằng AIzaSy...",
+    )
+    if col_btn.button("💾 Lưu & bắt đầu", type="primary", use_container_width=True):
+        if not api_key.strip():
+            st.error("Vui lòng nhập API Key trước.")
+        elif not api_key.strip().startswith("AIza"):
+            st.warning("⚠️  API Key thường bắt đầu bằng 'AIza...'. Kiểm tra lại.")
+        else:
+            try:
+                _save_env({"GEMINI_API_KEY": api_key.strip()})
+                st.success("✅ Đã lưu! Đang khởi động lại...")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Không thể lưu: {e}")
+
+    with st.expander("💡 Câu hỏi thường gặp"):
+        st.markdown("""
+**Miễn phí không?**
+Gói miễn phí của Gemini API đủ để dịch 30–50 chương mỗi ngày. Không cần thẻ tín dụng.
+
+**Dữ liệu có an toàn không?**
+API Key được lưu trong file `.env` trên máy tính của bạn, không chia sẻ với bên thứ ba nào.
+
+**Tôi cần biết lập trình không?**
+Hoàn toàn không. LiTTrans có giao diện web đơn giản để thao tác bằng nút bấm.
+
+**Hỗ trợ loại file nào?**
+`.txt` và `.md`. Nếu có file `.epub`, dùng tab **📚 EPUB** để chuyển đổi trước.
+        """)
+
+
+# ══════════════════════════════════════════════════════════════════
 # PAGE: DỊCH
 # ══════════════════════════════════════════════════════════════════
 
@@ -355,13 +514,20 @@ def render_translate() -> None:
     done  = sum(1 for c in chapters if c["done"])
     total = len(chapters)
 
-    st.subheader("Dịch chương")
+    st.subheader("📄 Dịch chương")
 
     # ── Upload ─────────────────────────────────────────────────────
-    with st.expander("📁 Upload file chương", expanded=not chapters):
+    with st.expander("📁 Upload file chương (.txt / .md)", expanded=not chapters):
+        st.markdown(
+            "Đặt tên file theo thứ tự để pipeline dịch đúng thứ tự: "
+            "`chapter_001.txt`, `chapter_002.txt`, ...",
+            help="File .txt hoặc .md chứa nội dung chương tiếng Anh cần dịch.",
+        )
         uploaded = st.file_uploader(
-            "Chọn file .txt / .md", type=["txt", "md"],
-            accept_multiple_files=True, label_visibility="collapsed",
+            "Chọn file",
+            type=["txt", "md"],
+            accept_multiple_files=True,
+            label_visibility="collapsed",
         )
         if uploaded:
             try:
@@ -377,17 +543,42 @@ def render_translate() -> None:
             load_chapters.clear()
             st.rerun()
 
-    # ── Chapter list ───────────────────────────────────────────────
+    # ── Empty state ────────────────────────────────────────────────
     if not chapters:
-        if S.current_novel:
-            st.info(f"Chưa có file nào trong `inputs/{S.current_novel}/`. Upload file để bắt đầu.")
-        else:
-            st.info("Chưa có file nào trong `inputs/`. Upload file hoặc tạo subfolder novel.")
-    else:
+        st.markdown("---")
+        st.info(
+            "**Chưa có chương nào.** Upload file `.txt` hoặc `.md` vào ô trên để bắt đầu.\n\n"
+            "Nếu có file `.epub`, hãy chuyển đổi trước bằng tab **📚 EPUB** ở menu bên trái."
+        )
+        return
+
+    # ── Chapter list ───────────────────────────────────────────────
+    if total:
+        pct = done / total
+        st.progress(pct, text=f"Tiến độ: {done}/{total} chương đã dịch ({int(pct*100)}%)")
+
+    # Status filter
+    col_f1, col_f2, _ = st.columns([1, 1, 3])
+    show_filter = col_f1.selectbox(
+        "Hiển thị",
+        ["Tất cả", "Chưa dịch", "Đã dịch"],
+        label_visibility="collapsed",
+    )
+    if col_f2.button("↺ Làm mới danh sách"):
+        load_chapters.clear()
+        st.rerun()
+
+    filtered_chapters = chapters
+    if show_filter == "Chưa dịch":
+        filtered_chapters = [c for c in chapters if not c["done"]]
+    elif show_filter == "Đã dịch":
+        filtered_chapters = [c for c in chapters if c["done"]]
+
+    if filtered_chapters:
         h0, h1, h2, h3 = st.columns([0.4, 3, 0.8, 1.5])
         h0.caption("STT"); h1.caption("File")
         h2.caption("Kích thước"); h3.caption("Trạng thái")
-        for ch in chapters:
+        for ch in filtered_chapters:
             c0, c1, c2, c3 = st.columns([0.4, 3, 0.8, 1.5])
             c0.write(f"`{ch['idx']+1:03d}`")
             c1.write(ch["name"])
@@ -396,31 +587,40 @@ def render_translate() -> None:
                 c3.markdown('<span class="badge badge-ok">✅ Đã dịch</span>', unsafe_allow_html=True)
             else:
                 c3.markdown('<span class="badge badge-warn">⬜ Chưa dịch</span>', unsafe_allow_html=True)
-
-    if total:
-        pct = done / total
-        st.progress(pct, text=f"Tổng: {done}/{total} ({int(pct*100)}%)")
+    elif show_filter != "Tất cả":
+        st.info(f"Không có chương nào ở trạng thái '{show_filter}'.")
 
     st.divider()
 
+    # ── Run pipeline ───────────────────────────────────────────────
+    pending_count = total - done
     col_btn, col_info = st.columns([1, 4])
+
     if not S.running:
-        if col_btn.button("▶ Chạy pipeline", type="primary",
-                          disabled=not chapters or not total - done):
+        btn_disabled = not chapters or pending_count == 0
+        btn_help = (
+            "Tất cả chương đã được dịch." if done == total and total > 0
+            else "Nhấn để bắt đầu dịch tất cả chương chưa có bản dịch."
+        )
+        if col_btn.button(
+            f"▶ Dịch {pending_count} chương" if pending_count > 0 else "▶ Dịch",
+            type="primary",
+            disabled=btn_disabled,
+            help=btn_help,
+        ):
             S.logs  = []
             S.log_q = queue.Queue()
             from littrans.ui.runner import run_background
-            # [v5.4] Truyền novel_name vào background thread
-            S.run_thread = run_background(
-                S.log_q, mode="run", novel_name=S.current_novel
-            )
+            S.run_thread = run_background(S.log_q, mode="run", novel_name=S.current_novel)
             S.running = True
             st.rerun()
         if total and done == total:
-            col_info.info("✅ Tất cả chương đã được dịch.")
+            col_info.success("🎉 Tất cả chương đã được dịch xong!")
+        elif total and pending_count > 0:
+            col_info.info(f"💡 Còn {pending_count} chương chưa dịch. Nhấn nút để bắt đầu.")
     else:
         col_btn.button("⏹ Đang chạy…", disabled=True)
-        col_info.warning("🔄 Pipeline đang chạy — đừng đóng cửa sổ.")
+        col_info.warning("🔄 Pipeline đang chạy — đừng đóng cửa sổ. Có thể mất vài phút mỗi chương.")
 
     if S.running or S.logs:
         if S.running:
@@ -431,8 +631,8 @@ def render_translate() -> None:
                 S.logs.append("✅ Pipeline hoàn tất.")
                 load_chapters.clear()
                 load_stats.clear()
-        st.markdown("**Log:**")
-        _show_log(S.logs)
+        with st.expander("📋 Nhật ký xử lý", expanded=S.running):
+            _show_log(S.logs)
         if S.running:
             time.sleep(0.9)
             st.rerun()
@@ -445,7 +645,9 @@ def render_translate() -> None:
 def render_chapters() -> None:
     chapters = load_chapters(S.current_novel)
     if not chapters:
-        st.info("Chưa có file nào.")
+        st.info(
+            "**Chưa có chương nào.** Vào tab **📄 Dịch** để upload file và bắt đầu dịch."
+        )
         return
 
     col_list, col_view = st.columns([1, 3.2])
@@ -489,14 +691,15 @@ def _render_chapter_detail(ch: dict) -> None:
         except Exception:
             pass
     nl_label = f"⚠️ {nl_count} vi phạm" if nl_count else "✅ 0 vi phạm"
-    m4.metric("Name Lock", nl_label)
+    m4.metric("Name Lock", nl_label, help="Số lần tên nhân vật bị dịch không đúng theo bảng đã chốt")
 
-    tabs = st.tabs(["🔀 Song song", "📄 Bản gốc", "🇻🇳 Bản dịch", "⚡ Diff"])
+    tabs = st.tabs(["🔀 Song song", "📄 Bản gốc", "🇻🇳 Bản dịch", "⚡ So sánh"])
 
     with tabs[0]:
         if not ch["done"]:
-            st.info("Chương chưa dịch — chỉ hiển thị bản gốc.")
-            st.text_area("", raw, height=420, disabled=True, label_visibility="collapsed")
+            st.info("Chương này chưa có bản dịch. Vào tab **📄 Dịch** để dịch.")
+            if raw:
+                st.text_area("Bản gốc", raw, height=420, disabled=True, label_visibility="collapsed")
         elif not raw:
             st.warning("Không đọc được file gốc.")
         else:
@@ -512,26 +715,31 @@ def _render_chapter_detail(ch: dict) -> None:
         if ch["done"] and vn:
             st.text_area("", vn, height=500, disabled=True, label_visibility="collapsed")
             c1, c2 = st.columns([1, 5])
-            c2.download_button("⬇ Tải xuống", data=vn.encode("utf-8"),
-                               file_name=f"{ch['path'].stem}_VN.txt",
-                               mime="text/plain", key="dl_vn")
+            c2.download_button(
+                "⬇ Tải xuống bản dịch",
+                data=vn.encode("utf-8"),
+                file_name=f"{ch['path'].stem}_VN.txt",
+                mime="text/plain",
+                key="dl_vn",
+            )
         elif not ch["done"]:
-            st.info("Chương chưa được dịch.")
+            st.info("Chương chưa được dịch. Vào tab **📄 Dịch** để dịch.")
         else:
             st.warning("Không đọc được file dịch.")
 
     with tabs[3]:
         if not ch["done"]:
-            st.info("Cần có bản dịch để xem diff.")
+            st.info("Cần có bản dịch để xem so sánh.")
         elif not raw or not vn:
             st.warning("Thiếu nội dung để so sánh.")
         else:
+            st.caption("🟢 Đoạn thêm vào  🟡 Đoạn thay đổi  🔴 Đoạn bị xóa")
             diff_view(raw, vn)
 
     # ── Retranslate panel ──────────────────────────────────────────
     st.divider()
     rt_col, _ = st.columns([1, 5])
-    btn_label = "✕ Đóng" if S.show_rt else "↺ Dịch lại…"
+    btn_label = "✕ Đóng" if S.show_rt else "↺ Dịch lại chương này"
     if rt_col.button(btn_label, key="rt_toggle", type="secondary"):
         S.show_rt = not S.show_rt
         S.rt_logs = []
@@ -542,9 +750,19 @@ def _render_chapter_detail(ch: dict) -> None:
             st.markdown(f"**↺ Dịch lại — `{ch['name']}`**")
             if ch["done"]:
                 st.warning("⚠️  Bản dịch hiện tại sẽ bị **ghi đè** sau khi dịch lại.")
-            c1, c2 = st.columns(2)
-            update_data = c1.checkbox("Cập nhật data", value=False, key="rt_upd")
-            force_scout = c2.checkbox("Chạy Scout AI trước", value=False, key="rt_scout")
+
+            with st.expander("⚙️ Tùy chọn nâng cao", expanded=False):
+                c1, c2 = st.columns(2)
+                update_data = c1.checkbox(
+                    "Cập nhật dữ liệu nhân vật/từ điển",
+                    value=False,
+                    help="Sau khi dịch lại, tự động cập nhật thông tin nhân vật và thuật ngữ mới.",
+                )
+                force_scout = c2.checkbox(
+                    "Chạy Scout AI trước",
+                    value=False,
+                    help="Scout AI sẽ đọc các chương gần đây để cập nhật ngữ cảnh trước khi dịch lại.",
+                )
 
             if not S.rt_running:
                 if st.button("⚡ Xác nhận dịch lại", type="primary", key="rt_confirm"):
@@ -552,7 +770,6 @@ def _render_chapter_detail(ch: dict) -> None:
                     S.rt_q    = queue.Queue()
                     all_files_list = [c["name"] for c in load_chapters(S.current_novel)]
                     from littrans.ui.runner import run_background
-                    # [v5.4] Truyền novel_name
                     S.rt_thread = run_background(
                         S.rt_q,
                         mode          = "retranslate",
@@ -577,7 +794,8 @@ def _render_chapter_detail(ch: dict) -> None:
                         S.rt_logs.append("✅ Dịch lại hoàn tất.")
                         load_chapters.clear()
                         load_stats.clear()
-                _show_log(S.rt_logs)
+                with st.expander("📋 Nhật ký", expanded=S.rt_running):
+                    _show_log(S.rt_logs)
                 if S.rt_running:
                     time.sleep(0.9)
                     st.rerun()
@@ -588,22 +806,30 @@ def _render_chapter_detail(ch: dict) -> None:
 # ══════════════════════════════════════════════════════════════════
 
 def render_characters() -> None:
-    chars_data = load_characters()
+    chars_data = load_characters(S.current_novel)
     active  = chars_data["active"]
     archive = chars_data["archive"]
 
     if not active and not archive:
-        st.info("Chưa có nhân vật nào. Chạy pipeline để tạo dữ liệu.")
+        st.info(
+            "**Chưa có nhân vật nào.** Dữ liệu nhân vật sẽ được tự động thu thập "
+            "trong quá trình dịch. Hãy dịch ít nhất một chương trước."
+        )
         return
 
-    tab_a, tab_b = st.tabs([f"Active ({len(active)})", f"Archive ({len(archive)})"])
+    tab_a, tab_b = st.tabs([
+        f"Đang theo dõi ({len(active)})",
+        f"Lưu trữ ({len(archive)})",
+    ])
     for tab, chars, label in [(tab_a, active, "active"), (tab_b, archive, "archive")]:
         with tab:
             if not chars:
                 st.info(f"Không có nhân vật nào trong {label}.")
                 continue
-            search = st.text_input("🔍", placeholder="Tìm tên...",
-                                   label_visibility="collapsed", key=f"cs_{label}")
+            search = st.text_input(
+                "🔍", placeholder="Tìm tên nhân vật...",
+                label_visibility="collapsed", key=f"cs_{label}",
+            )
             filtered = {k: v for k, v in chars.items()
                         if not search or search.lower() in k.lower()}
             st.caption(f"{len(filtered)} nhân vật")
@@ -631,9 +857,9 @@ def _char_card(name: str, p: dict) -> None:
 
     state = em.get("current", "normal")
     em_map = {
-        "angry"  : '<span class="badge badge-err">ANGRY</span>',
-        "hurt"   : '<span class="badge badge-warn">HURT</span>',
-        "changed": '<span class="badge badge-info">CHANGED</span>',
+        "angry"  : '<span class="badge badge-err">TỨC GIẬN</span>',
+        "hurt"   : '<span class="badge badge-warn">TỔN THƯƠNG</span>',
+        "changed": '<span class="badge badge-info">ĐÃ THAY ĐỔI</span>',
     }
     em_html = em_map.get(state, "")
 
@@ -659,7 +885,7 @@ def _char_card(name: str, p: dict) -> None:
             if em_html:
                 st.markdown(em_html, unsafe_allow_html=True)
 
-        tab_profile, tab_history = st.tabs(["Profile", f"Lịch sử ({len(history)})"])
+        tab_profile, tab_history = st.tabs(["Thông tin", f"Lịch sử ({len(history)})"])
 
         with tab_profile:
             st.caption(f"Tự xưng: **{pronoun_self}** · Cấp: **{level}**")
@@ -684,7 +910,7 @@ def _render_char_history(name: str, p: dict) -> None:
     try:
         from littrans.context.char_history import get_log, get_log_rel, get_log_all_rels
     except ImportError:
-        st.caption("char_history module chưa được cài.")
+        st.caption("Chưa có dữ liệu lịch sử.")
         return
 
     history = get_log(p, limit=30)
@@ -693,20 +919,24 @@ def _render_char_history(name: str, p: dict) -> None:
         return
 
     rel_options = ["Tất cả"] + list(p.get("relationships", {}).keys())
-    sel_rel = st.selectbox("Lọc theo", rel_options,
-                           key=f"hist_rel_{name}", label_visibility="collapsed")
+    sel_rel = st.selectbox(
+        "Lọc theo quan hệ",
+        rel_options,
+        key=f"hist_rel_{name}",
+        label_visibility="collapsed",
+    )
 
     if sel_rel != "Tất cả":
         history = get_log_rel(p, sel_rel, limit=20)
-        st.caption(f"{len(history)} commits liên quan đến {sel_rel}")
+        st.caption(f"{len(history)} thay đổi liên quan đến {sel_rel}")
     else:
-        st.caption(f"{len(p.get('_history', []))} commits · đang hiển thị {len(history)} gần nhất")
+        st.caption(f"{len(p.get('_history', []))} thay đổi · hiển thị {len(history)} gần nhất")
 
     trigger_badge_map = {
-        "post_call"          : ("badge-info", "post_call"),
+        "post_call"          : ("badge-info", "dịch"),
         "scout"              : ("badge-ok",   "scout"),
-        "relationship_update": ("badge-warn", "rel"),
-        "manual"             : ("badge-dim",  "manual"),
+        "relationship_update": ("badge-warn", "quan hệ"),
+        "manual"             : ("badge-dim",  "thủ công"),
     }
 
     for commit in history:
@@ -727,32 +957,20 @@ def _render_char_history(name: str, p: dict) -> None:
                 if "added" in diff:
                     st.markdown(f"`{field}`")
                     for item in diff.get("added", []):
-                        st.markdown(f'<span style="color:var(--color-text-success)">+ {item}</span>',
+                        st.markdown(f'<span style="color:green">+ {item}</span>',
                                     unsafe_allow_html=True)
                     for item in diff.get("removed", []):
-                        st.markdown(f'<span style="color:var(--color-text-danger);text-decoration:line-through">- {item}</span>',
+                        st.markdown(f'<span style="color:red;text-decoration:line-through">- {item}</span>',
                                     unsafe_allow_html=True)
                 elif "old" in diff:
                     old_v = str(diff["old"]) if diff["old"] else "_(trống)_"
                     new_v = str(diff["new"]) if diff["new"] else "_(trống)_"
                     st.markdown(f"`{field}`")
                     col1, col2 = st.columns(2)
-                    col1.markdown(f'<span style="color:var(--color-text-danger)">- {old_v}</span>',
+                    col1.markdown(f'<span style="color:red">- {old_v}</span>',
                                   unsafe_allow_html=True)
-                    col2.markdown(f'<span style="color:var(--color-text-success)">+ {new_v}</span>',
+                    col2.markdown(f'<span style="color:green">+ {new_v}</span>',
                                   unsafe_allow_html=True)
-
-    if sel_rel == "Tất cả":
-        try:
-            from littrans.context.char_history import get_log_all_rels
-            all_rel_h = get_log_all_rels(p)
-            if all_rel_h:
-                st.divider()
-                st.caption("Relationship commits:")
-                for target, commits in all_rel_h.items():
-                    st.caption(f"  ↔ {target}: {len(commits)} commits")
-        except Exception:
-            pass
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -761,41 +979,54 @@ def _render_char_history(name: str, p: dict) -> None:
 
 def render_glossary() -> None:
     import pandas as pd
-    glos = load_glossary_data()
+    glos = load_glossary_data(S.current_novel)
     if not glos:
-        st.info("Glossary chưa có dữ liệu. Chạy pipeline để tự động thêm thuật ngữ.")
+        st.info(
+            "**Từ điển trống.** Thuật ngữ sẽ được tự động thu thập trong quá trình dịch. "
+            "Sau khi dịch vài chương, chạy **🔄 Phân loại thuật ngữ** để sắp xếp vào đúng danh mục."
+        )
         return
 
     staging_count = len(glos.get("staging", []))
     if staging_count:
-        st.info(f"📖 Scout AI đề xuất **{staging_count}** thuật ngữ mới đang chờ trong Staging. "
-                "Nhấn **🔄 Clean glossary** bên dưới để phân loại và xác nhận vào đúng category.")
+        st.info(
+            f"📖 **{staging_count} thuật ngữ mới** đang chờ phân loại. "
+            "Nhấn **🔄 Phân loại thuật ngữ** để AI tự động sắp xếp vào đúng danh mục."
+        )
 
     c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
-    sel_cat = c1.selectbox("Category", ["Tất cả"] + list(glos.keys()),
-                           label_visibility="collapsed", key="glos_cat")
-    search = c2.text_input("🔍", placeholder="Tìm thuật ngữ…",
-                           label_visibility="collapsed", key="glos_q")
+    sel_cat = c1.selectbox(
+        "Danh mục",
+        ["Tất cả"] + list(glos.keys()),
+        label_visibility="collapsed",
+        key="glos_cat",
+        help="Lọc thuật ngữ theo danh mục",
+    )
+    search = c2.text_input(
+        "🔍",
+        placeholder="Tìm thuật ngữ...",
+        label_visibility="collapsed",
+        key="glos_q",
+    )
     with c3:
         if not S.clean_running:
-            if st.button("🔄 Clean glossary"):
+            if st.button("🔄 Phân loại thuật ngữ", help="AI tự động phân loại thuật ngữ trong Staging vào đúng danh mục"):
                 S.clean_logs = []
                 S.clean_q    = queue.Queue()
                 from littrans.ui.runner import run_background
-                # [v5.4] Truyền novel_name
                 run_background(S.clean_q, mode="clean_glossary", novel_name=S.current_novel)
                 S.clean_running = True
                 st.rerun()
         else:
             st.button("⏳ Đang phân loại…", disabled=True)
     with c4:
-        if st.button("↺ Refresh"):
+        if st.button("↺ Làm mới"):
             load_glossary_data.clear()
             st.rerun()
 
     _cat_label = {
-        "pathways": "pathway", "organizations": "org", "items": "item",
-        "locations": "location", "general": "general", "staging": "⏳ staging",
+        "pathways": "Tu luyện", "organizations": "Tổ chức", "items": "Vật phẩm",
+        "locations": "Địa danh", "general": "Chung", "staging": "⏳ Chưa phân loại",
     }
     rows = []
     for cat, entries in glos.items():
@@ -803,27 +1034,27 @@ def render_glossary() -> None:
         for eng, vn in entries:
             if search and search.lower() not in eng.lower() and search.lower() not in vn.lower():
                 continue
-            rows.append({"Tiếng Anh": eng, "Tiếng Việt": vn, "Category": _cat_label.get(cat, cat)})
+            rows.append({"Tiếng Anh": eng, "Tiếng Việt": vn, "Danh mục": _cat_label.get(cat, cat)})
 
     if rows:
         st.caption(f"{len(rows)} thuật ngữ")
         df = pd.DataFrame(rows)
         st.dataframe(df, use_container_width=True, hide_index=True,
-                     column_config={"Category": st.column_config.TextColumn(width="small")})
+                     column_config={"Danh mục": st.column_config.TextColumn(width="small")})
     else:
-        st.info("Không tìm thấy thuật ngữ phù hợp.")
+        st.info("Không tìm thấy thuật ngữ nào.")
 
     if S.clean_running or S.clean_logs:
         if S.clean_running:
             done_flag = _poll("clean_q", "clean_logs")
             if done_flag:
                 S.clean_running = False
-                S.clean_logs.append("✅ Clean glossary hoàn tất.")
+                S.clean_logs.append("✅ Phân loại hoàn tất.")
                 load_glossary_data.clear()
                 load_stats.clear()
         if S.clean_logs:
-            st.markdown("**Log:**")
-            _show_log(S.clean_logs)
+            with st.expander("📋 Nhật ký", expanded=S.clean_running):
+                _show_log(S.clean_logs)
         if S.clean_running:
             time.sleep(0.9)
             st.rerun()
@@ -835,45 +1066,74 @@ def render_glossary() -> None:
 
 def render_stats() -> None:
     import pandas as pd
-    s        = load_stats()
+    s        = load_stats(S.current_novel)
     chapters = load_chapters(S.current_novel)
     done  = sum(1 for c in chapters if c["done"])
     total = len(chapters)
 
-    st.subheader("Thống kê pipeline")
+    st.subheader("📊 Tổng quan")
 
+    # Main metrics
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Chương đã dịch", f"{done} / {total}",
-              delta=f"{int(done/total*100)}%" if total else None)
-    m2.metric("Nhân vật active",  s["chars"].get("active", 0))
-    m3.metric("Nhân vật archive", s["chars"].get("archive", 0))
+    m1.metric(
+        "Chương đã dịch",
+        f"{done} / {total}",
+        delta=f"{int(done/total*100)}%" if total else None,
+        help="Số chương đã có bản dịch / tổng số chương",
+    )
+    m2.metric("Nhân vật đang theo dõi", s["chars"].get("active", 0),
+              help="Nhân vật xuất hiện gần đây")
+    m3.metric("Nhân vật lưu trữ", s["chars"].get("archive", 0),
+              help="Nhân vật lâu không xuất hiện")
     em_count = s["chars"].get("emotional", 0)
-    m4.metric("Có emotion state", em_count, delta_color="inverse")
+    m4.metric(
+        "Đang có trạng thái đặc biệt",
+        em_count,
+        delta="cần chú ý" if em_count else None,
+        delta_color="inverse",
+        help="Nhân vật đang tức giận / tổn thương / vừa thay đổi",
+    )
 
     st.divider()
+
+    # Glossary & tools
     glos        = s.get("glos", {})
     total_terms = sum(v for k, v in glos.items() if k != "staging")
     staging_terms = glos.get("staging", 0)
     m5, m6, m7, m8 = st.columns(4)
-    m5.metric("Thuật ngữ tổng",    total_terms)
-    m6.metric("  Staging (chờ)",   staging_terms,
-              delta="cần phân loại" if staging_terms else None, delta_color="inverse")
-    m7.metric("Kỹ năng tổng",      s["skills"].get("total", 0))
-    m8.metric("Name Lock entries", s["lock"].get("total_locked", 0))
+    m5.metric("Thuật ngữ trong từ điển", total_terms)
+    m6.metric(
+        "Chờ phân loại",
+        staging_terms,
+        delta="cần phân loại" if staging_terms else None,
+        delta_color="inverse",
+        help="Vào tab Từ điển → Phân loại thuật ngữ để xử lý",
+    )
+    m7.metric("Kỹ năng đã biết", s["skills"].get("total", 0))
+    m8.metric("Tên đã chốt", s["lock"].get("total_locked", 0),
+              help="Số tên nhân vật/địa danh đã có bản dịch cố định")
 
+    # Chart
     chart_data = {k: v for k, v in glos.items() if v and k != "staging"}
     if chart_data:
         st.divider()
-        st.markdown("**Phân bổ Glossary theo category**")
-        import pandas as pd
-        df = pd.DataFrame.from_dict(chart_data, orient="index", columns=["Thuật ngữ"])
+        st.markdown("**Phân bổ từ điển theo danh mục**")
+        cat_vn = {
+            "pathways": "Tu luyện", "organizations": "Tổ chức",
+            "items": "Vật phẩm", "locations": "Địa danh", "general": "Chung",
+        }
+        df = pd.DataFrame.from_dict(
+            {cat_vn.get(k, k): v for k, v in chart_data.items()},
+            orient="index",
+            columns=["Thuật ngữ"],
+        )
         st.bar_chart(df, color="#3B6D11")
 
     if total:
         st.divider()
         pct = done / total
-        st.progress(pct)
-        st.caption(f"{done}/{total} chương · {int(pct*100)}% hoàn thành")
+        st.progress(pct, text=f"Tiến độ dịch: {done}/{total} chương · {int(pct*100)}%")
+
         rows = [{"Chương": c["name"], "Trạng thái": "✅ Đã dịch" if c["done"] else "⬜ Chưa",
                  "Kích thước": c["size"]} for c in chapters]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -898,118 +1158,252 @@ def render_settings() -> None:
         return v in ("true", "1", "yes", "on") if v else default
 
     hcol1, hcol2, hcol3 = st.columns([4, 1, 1])
-    hcol1.subheader("Cài đặt")
-    save_clicked  = hcol2.button("💾 Lưu .env", type="primary")
-    reset_clicked = hcol3.button("↺ Mặc định")
+    hcol1.subheader("⚙️ Cài đặt")
+    save_clicked  = hcol2.button("💾 Lưu", type="primary", use_container_width=True)
+    reset_clicked = hcol3.button("↺ Reset", use_container_width=True)
 
     if S.settings_saved:
-        st.success("✅ Đã lưu vào `.env` — khởi động lại pipeline để áp dụng.")
+        st.success("✅ Đã lưu! Khởi động lại pipeline để áp dụng thay đổi.")
         S.settings_saved = False
 
     if not _ENV_PATH.exists():
-        st.warning(f"⚠️  Chưa có file `.env`. Điền thông tin và nhấn **Lưu .env** để tạo.")
+        st.warning("⚠️  Chưa có file `.env`. Điền API Key và nhấn **Lưu** để tạo.")
 
-    tabs = st.tabs([
-        "🔑 API", "⚙️ Pipeline", "🔭 Scout AI",
-        "📖 Glossary Suggest", "👤 Nhân vật",
-        "💰 Token Budget", "🔀 Merge & Retry", "📁 Đường dẫn",
-    ])
     updates: dict[str, str] = {}
 
+    # ── Quick Setup (tab đầu tiên, nổi bật) ──────────────────────
+    tabs = st.tabs([
+        "🚀 Cài đặt cơ bản",
+        "⚙️ Pipeline",
+        "🔭 Scout AI",
+        "📖 Từ điển tự động",
+        "👤 Nhân vật",
+        "💰 Giới hạn token",
+        "🔀 Merge & Retry",
+        "📁 Đường dẫn",
+    ])
+
     with tabs[0]:
-        st.markdown("#### Gemini API Keys")
-        k_primary = st.text_input("Primary key", value=e("GEMINI_API_KEY"), type="password")
-        k_fb1     = st.text_input("Fallback key 1", value=e("FALLBACK_KEY_1"), type="password")
-        k_fb2     = st.text_input("Fallback key 2", value=e("FALLBACK_KEY_2"), type="password")
-        updates.update({"GEMINI_API_KEY": k_primary, "FALLBACK_KEY_1": k_fb1, "FALLBACK_KEY_2": k_fb2})
-        st.divider()
-        st.markdown("#### Model & Key Rotation")
+        st.markdown("#### 🔑 API Key (bắt buộc)")
+        st.markdown(
+            "API Key Gemini **miễn phí** từ [aistudio.google.com](https://aistudio.google.com). "
+            "Đăng nhập bằng tài khoản Google → **Get API key → Create API key**."
+        )
+
+        k_primary = st.text_input(
+            "Gemini API Key *",
+            value=e("GEMINI_API_KEY"),
+            type="password",
+            placeholder="AIzaSy...",
+            help="Bắt buộc. Lấy miễn phí tại aistudio.google.com",
+        )
+        updates["GEMINI_API_KEY"] = k_primary
+
+        st.markdown("**Key dự phòng** (khuyến nghị — dùng khi key chính bị rate limit)")
         c1, c2 = st.columns(2)
-        _models  = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash-exp", "gemini-1.5-pro"]
-        cur_model = e("GEMINI_MODEL", "gemini-2.5-flash")
-        model_idx = _models.index(cur_model) if cur_model in _models else 0
-        model  = c1.selectbox("Gemini model", _models, index=model_idx)
-        rotate = c2.number_input("Key rotate threshold", 1, 10, ei("KEY_ROTATE_THRESHOLD", 3))
-        updates["GEMINI_MODEL"] = model
-        updates["KEY_ROTATE_THRESHOLD"] = str(rotate)
+        k_fb1 = c1.text_input("Key dự phòng 1", value=e("FALLBACK_KEY_1"), type="password",
+                               help="API key từ tài khoản Google khác")
+        k_fb2 = c2.text_input("Key dự phòng 2", value=e("FALLBACK_KEY_2"), type="password")
+        updates.update({"FALLBACK_KEY_1": k_fb1, "FALLBACK_KEY_2": k_fb2})
+
         st.divider()
-        st.markdown("#### Translation Model (Dual-Model)")
+        st.markdown("#### 🤖 Engine dịch")
         provider_opts = ["gemini", "anthropic"]
         cur_provider  = e("TRANSLATION_PROVIDER", "gemini")
         provider_idx  = provider_opts.index(cur_provider) if cur_provider in provider_opts else 0
-        provider_sel  = st.selectbox("Translation provider", provider_opts, index=provider_idx)
-        trans_model   = st.text_input("Translation model (để trống = mặc định)", value=e("TRANSLATION_MODEL", ""))
-        anthropic_key = st.text_input("Anthropic API Key", value=e("ANTHROPIC_API_KEY"), type="password")
-        updates.update({"TRANSLATION_PROVIDER": provider_sel, "TRANSLATION_MODEL": trans_model,
-                        "ANTHROPIC_API_KEY": anthropic_key})
+
+        provider_labels = {
+            "gemini"    : "Gemini (Google) — miễn phí, khuyến nghị cho người mới",
+            "anthropic" : "Claude (Anthropic) — chất lượng cao hơn, có phí",
+        }
+        provider_sel = st.radio(
+            "Provider",
+            provider_opts,
+            index=provider_idx,
+            format_func=lambda x: provider_labels[x],
+            horizontal=False,
+            help="Gemini miễn phí và đủ chất lượng cho hầu hết người dùng.",
+        )
+        updates["TRANSLATION_PROVIDER"] = provider_sel
+
+        if provider_sel == "gemini":
+            _models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash-exp", "gemini-1.5-pro"]
+            model_labels = {
+                "gemini-2.5-flash"    : "Gemini 2.5 Flash (nhanh, miễn phí) ✓",
+                "gemini-2.5-pro"      : "Gemini 2.5 Pro (tốt hơn, giới hạn thấp hơn)",
+                "gemini-2.0-flash-exp": "Gemini 2.0 Flash Exp (cũ hơn)",
+                "gemini-1.5-pro"      : "Gemini 1.5 Pro (cũ)",
+            }
+            cur_model = e("GEMINI_MODEL", "gemini-2.5-flash")
+            model_idx = _models.index(cur_model) if cur_model in _models else 0
+            model = st.selectbox(
+                "Model",
+                _models,
+                index=model_idx,
+                format_func=lambda x: model_labels.get(x, x),
+            )
+            updates["GEMINI_MODEL"] = model
+            updates["TRANSLATION_MODEL"] = ""
+        else:
+            anthropic_key = st.text_input(
+                "Anthropic API Key *",
+                value=e("ANTHROPIC_API_KEY"),
+                type="password",
+                placeholder="sk-ant-...",
+                help="Lấy tại console.anthropic.com",
+            )
+            updates["ANTHROPIC_API_KEY"] = anthropic_key
+            trans_model = st.text_input(
+                "Claude model",
+                value=e("TRANSLATION_MODEL", "claude-sonnet-4-6"),
+                help="Ví dụ: claude-sonnet-4-6, claude-opus-4-6",
+            )
+            updates["TRANSLATION_MODEL"] = trans_model
+
+        st.divider()
+        st.markdown("#### ⏱️ Tốc độ dịch")
+        st.caption(
+            "Pipeline nghỉ giữa các chương để tránh bị Google giới hạn. "
+            "Nếu bị lỗi 429 nhiều, hãy tăng thời gian nghỉ lên."
+        )
+        c1, c2 = st.columns(2)
+        succ_s = c1.slider(
+            "Nghỉ sau mỗi chương thành công (giây)",
+            0, 120, ei("SUCCESS_SLEEP", 30), step=5,
+            help="Thời gian chờ giữa các chương. Giảm = nhanh hơn nhưng dễ bị rate limit hơn.",
+        )
+        rl_s = c2.slider(
+            "Nghỉ khi bị rate limit (giây)",
+            10, 300, ei("RATE_LIMIT_SLEEP", 60), step=10,
+            help="Khi Google báo lỗi 429 (quá nhiều request), pipeline chờ bao lâu trước khi thử lại.",
+        )
+        updates.update({"SUCCESS_SLEEP": str(succ_s), "RATE_LIMIT_SLEEP": str(rl_s)})
 
     with tabs[1]:
-        st.info("Pipeline luôn dùng **3-call flow** (Pre → Trans → Post).", icon="ℹ️")
+        st.info("Pipeline luôn dùng **3 bước**: Phân tích → Dịch → Kiểm tra.", icon="ℹ️")
         c1, c2, c3 = st.columns(3)
-        pre_s  = c1.slider("Pre-call sleep (s)",  0, 30, ei("PRE_CALL_SLEEP", 5))
-        post_s = c2.slider("Post-call sleep (s)", 0, 30, ei("POST_CALL_SLEEP", 5))
-        post_r = c3.number_input("Post max retries", 0, 5, ei("POST_CALL_MAX_RETRIES", 2))
-        retry_q = st.toggle("Retry Trans-call khi Post báo lỗi", value=eb("TRANS_RETRY_ON_QUALITY", True))
-        updates.update({"PRE_CALL_SLEEP": str(pre_s), "POST_CALL_SLEEP": str(post_s),
-                        "POST_CALL_MAX_RETRIES": str(post_r),
-                        "TRANS_RETRY_ON_QUALITY": "true" if retry_q else "false"})
+        pre_s  = c1.slider("Nghỉ trước khi dịch (s)",  0, 30, ei("PRE_CALL_SLEEP", 5))
+        post_s = c2.slider("Nghỉ sau khi dịch (s)", 0, 30, ei("POST_CALL_SLEEP", 5))
+        post_r = c3.number_input("Số lần kiểm tra lại", 0, 5, ei("POST_CALL_MAX_RETRIES", 2))
+        retry_q = st.toggle(
+            "Dịch lại khi phát hiện lỗi",
+            value=eb("TRANS_RETRY_ON_QUALITY", True),
+            help="Nếu bước kiểm tra phát hiện lỗi dịch thuật, tự động dịch lại.",
+        )
+        updates.update({
+            "PRE_CALL_SLEEP": str(pre_s), "POST_CALL_SLEEP": str(post_s),
+            "POST_CALL_MAX_RETRIES": str(post_r),
+            "TRANS_RETRY_ON_QUALITY": "true" if retry_q else "false",
+        })
         st.divider()
-        st.markdown("#### Timing & Giới hạn")
-        c1, c2, c3, c4 = st.columns(4)
-        max_ret   = c1.number_input("Max retries", 1, 20, ei("MAX_RETRIES", 5))
-        succ_s    = c2.slider("Success sleep (s)", 0, 120, ei("SUCCESS_SLEEP", 30), step=5)
-        rl_s      = c3.slider("Rate limit sleep (s)", 10, 300, ei("RATE_LIMIT_SLEEP", 60), step=10)
-        min_chars = c4.number_input("Min chars/chapter", 0, 5000, ei("MIN_CHARS_PER_CHAPTER", 500), step=100)
-        updates.update({"MAX_RETRIES": str(max_ret), "SUCCESS_SLEEP": str(succ_s),
-                        "RATE_LIMIT_SLEEP": str(rl_s), "MIN_CHARS_PER_CHAPTER": str(min_chars)})
+        max_ret   = st.number_input("Số lần thử lại tối đa khi lỗi", 1, 20, ei("MAX_RETRIES", 5))
+        min_chars = st.number_input(
+            "Độ dài tối thiểu mỗi chương (ký tự)",
+            0, 5000, ei("MIN_CHARS_PER_CHAPTER", 500), step=100,
+            help="Chương ngắn hơn mức này sẽ bị cảnh báo.",
+        )
+        updates.update({"MAX_RETRIES": str(max_ret), "MIN_CHARS_PER_CHAPTER": str(min_chars)})
 
     with tabs[2]:
+        st.markdown(
+            "Scout AI **đọc trước** nhiều chương để hiểu ngữ cảnh, "
+            "giúp bản dịch nhất quán hơn về xưng hô và mạch truyện."
+        )
         c1, c2, c3 = st.columns(3)
-        scout_ev = c1.slider("Scout refresh every", 1, 20, ei("SCOUT_REFRESH_EVERY", 5))
-        scout_lb = c2.slider("Scout lookback", 2, 30, ei("SCOUT_LOOKBACK", 10))
-        arc_win  = c3.slider("Arc memory window", 1, 10, ei("ARC_MEMORY_WINDOW", 3))
-        updates.update({"SCOUT_REFRESH_EVERY": str(scout_ev), "SCOUT_LOOKBACK": str(scout_lb),
-                        "ARC_MEMORY_WINDOW": str(arc_win)})
+        scout_ev = c1.slider("Chạy Scout mỗi N chương", 1, 20, ei("SCOUT_REFRESH_EVERY", 5),
+                             help="Scout chạy sau mỗi bao nhiêu chương.")
+        scout_lb = c2.slider("Đọc lại N chương gần nhất", 2, 30, ei("SCOUT_LOOKBACK", 10),
+                             help="Scout đọc bao nhiêu chương để lấy ngữ cảnh.")
+        arc_win  = c3.slider("Giữ bộ nhớ N arc", 1, 10, ei("ARC_MEMORY_WINDOW", 3),
+                             help="Số arc memory entries đưa vào mỗi prompt dịch.")
+        updates.update({
+            "SCOUT_REFRESH_EVERY": str(scout_ev),
+            "SCOUT_LOOKBACK": str(scout_lb),
+            "ARC_MEMORY_WINDOW": str(arc_win),
+        })
 
     with tabs[3]:
-        suggest_on = st.toggle("Bật Glossary Suggest", value=eb("SCOUT_SUGGEST_GLOSSARY", True))
+        suggest_on = st.toggle(
+            "Tự động phát hiện thuật ngữ mới",
+            value=eb("SCOUT_SUGGEST_GLOSSARY", True),
+            help="Scout AI sẽ tự động đề xuất thuật ngữ mới vào Staging để phân loại.",
+        )
         updates["SCOUT_SUGGEST_GLOSSARY"] = "true" if suggest_on else "false"
         c1, c2 = st.columns(2)
-        min_conf  = c1.slider("Confidence tối thiểu", 0.0, 1.0, ef("SCOUT_SUGGEST_MIN_CONFIDENCE", 0.7), step=0.05, disabled=not suggest_on)
-        max_terms = c2.number_input("Số thuật ngữ tối đa / lần Scout", 1, 50, ei("SCOUT_SUGGEST_MAX_TERMS", 20), disabled=not suggest_on)
+        min_conf = c1.slider(
+            "Độ tin cậy tối thiểu",
+            0.0, 1.0, ef("SCOUT_SUGGEST_MIN_CONFIDENCE", 0.7), step=0.05,
+            disabled=not suggest_on,
+            help="0.7 = Scout cần khá chắc chắn mới đề xuất. Tăng lên để ít đề xuất nhầm hơn.",
+        )
+        max_terms = c2.number_input(
+            "Tối đa N thuật ngữ mỗi lần Scout",
+            1, 50, ei("SCOUT_SUGGEST_MAX_TERMS", 20),
+            disabled=not suggest_on,
+        )
         updates["SCOUT_SUGGEST_MIN_CONFIDENCE"] = str(round(min_conf, 2))
         updates["SCOUT_SUGGEST_MAX_TERMS"]      = str(max_terms)
 
     with tabs[4]:
+        st.markdown(
+            "LiTTrans tự động lưu trữ nhân vật lâu không xuất hiện để tiết kiệm token."
+        )
         c1, c2 = st.columns(2)
-        arch_a = c1.slider("Archive after chapters", 10, 200, ei("ARCHIVE_AFTER_CHAPTERS", 60), step=10)
-        emo_r  = c2.slider("Emotion reset chapters", 1, 20, ei("EMOTION_RESET_CHAPTERS", 5))
+        arch_a = c1.slider(
+            "Lưu trữ sau N chương vắng mặt",
+            10, 200, ei("ARCHIVE_AFTER_CHAPTERS", 60), step=10,
+            help="Nhân vật không xuất hiện sau N chương sẽ chuyển sang lưu trữ.",
+        )
+        emo_r  = c2.slider(
+            "Reset trạng thái cảm xúc sau N chương",
+            1, 20, ei("EMOTION_RESET_CHAPTERS", 5),
+        )
         updates.update({"ARCHIVE_AFTER_CHAPTERS": str(arch_a), "EMOTION_RESET_CHAPTERS": str(emo_r)})
 
     with tabs[5]:
-        budget = st.number_input("Budget limit (0 = tắt)", min_value=0, step=10000,
-                                 value=ei("BUDGET_LIMIT", 150000))
+        st.markdown(
+            "Giới hạn số token gửi cho AI mỗi lần. Tăng nếu bị cắt nội dung, "
+            "giảm nếu bị lỗi token limit."
+        )
+        budget = st.number_input(
+            "Giới hạn token (0 = tắt)",
+            min_value=0, step=10000,
+            value=ei("BUDGET_LIMIT", 150000),
+            help="Thường để 150000. Giảm nếu model báo token quá dài.",
+        )
         updates["BUDGET_LIMIT"] = str(budget)
 
     with tabs[6]:
         c1, c2, c3 = st.columns(3)
-        imm = c1.toggle("Immediate merge", value=eb("IMMEDIATE_MERGE", True))
-        ag  = c2.toggle("Auto merge glossary", value=eb("AUTO_MERGE_GLOSSARY", False))
-        ac  = c3.toggle("Auto merge characters", value=eb("AUTO_MERGE_CHARACTERS", False))
-        updates.update({"IMMEDIATE_MERGE": "true" if imm else "false",
-                        "AUTO_MERGE_GLOSSARY": "true" if ag else "false",
-                        "AUTO_MERGE_CHARACTERS": "true" if ac else "false"})
-        rfp = st.number_input("Retry failed passes", 0, 10, ei("RETRY_FAILED_PASSES", 3))
+        imm = c1.toggle(
+            "Merge ngay sau mỗi chương",
+            value=eb("IMMEDIATE_MERGE", True),
+            help="Cập nhật nhân vật và từ điển ngay sau mỗi chương. Khuyến nghị bật.",
+        )
+        ag  = c2.toggle("Tự động phân loại thuật ngữ cuối pipeline", value=eb("AUTO_MERGE_GLOSSARY", False))
+        ac  = c3.toggle("Tự động merge nhân vật cuối pipeline", value=eb("AUTO_MERGE_CHARACTERS", False))
+        updates.update({
+            "IMMEDIATE_MERGE": "true" if imm else "false",
+            "AUTO_MERGE_GLOSSARY": "true" if ag else "false",
+            "AUTO_MERGE_CHARACTERS": "true" if ac else "false",
+        })
+        rfp = st.number_input(
+            "Thử lại chương lỗi N lần cuối pipeline",
+            0, 10, ei("RETRY_FAILED_PASSES", 3),
+        )
         updates["RETRY_FAILED_PASSES"] = str(rfp)
 
     with tabs[7]:
         st.markdown("#### Thư mục làm việc")
-        st.info("📚 Data của mỗi novel được lưu tự động trong `outputs/<TenNovel>/data/`. "
-                "Chỉ cần đặt file chương vào `inputs/<TenNovel>/`.", icon="ℹ️")
+        st.info(
+            "📚 Data của mỗi truyện được tự động lưu trong `outputs/<TenTruyen>/data/`. "
+            "Chỉ cần đặt file chương vào `inputs/<TenTruyen>/`.",
+            icon="ℹ️",
+        )
         _path_defs = [
-            ("INPUT_DIR",   "inputs",  "Thư mục gốc chứa các folder novel"),
-            ("OUTPUT_DIR",  "outputs", "Thư mục bản dịch + data (tự tạo subfolders)"),
-            ("PROMPTS_DIR", "prompts", "system_agent.md, character_profile.md"),
+            ("INPUT_DIR",   "inputs",  "Thư mục chứa file chương gốc tiếng Anh"),
+            ("OUTPUT_DIR",  "outputs", "Thư mục lưu bản dịch + data nhân vật/từ điển"),
+            ("PROMPTS_DIR", "prompts", "Thư mục chứa các file hướng dẫn cho AI"),
         ]
         for key, default, desc in _path_defs:
             val = st.text_input(f"`{key}`", value=e(key, default), help=desc)
@@ -1034,63 +1428,67 @@ def render_settings() -> None:
 # ══════════════════════════════════════════════════════════════════
 
 def _render_novel_selector() -> None:
-    """[v5.4] Novel selector trong sidebar."""
     novels = _get_available_novels()
 
     if not novels:
-        # Flat mode — không có subfolder
-        st.sidebar.caption("📁 Flat mode (1 truyện)")
-        st.sidebar.caption("Tạo subfolder trong `inputs/` để dùng multi-novel")
-        # Đảm bảo novel rỗng trong flat mode
+        st.sidebar.caption(
+            "📁 **Một truyện** (flat mode)\n\n"
+            "_Tạo subfolder trong `inputs/` để quản lý nhiều truyện._"
+        )
         if S.current_novel:
             S.current_novel = ""
             _apply_novel("")
         return
 
-    # Có novels → hiện selectbox
     current = S.current_novel if S.current_novel in novels else novels[0]
-
     selected = st.sidebar.selectbox(
-        "📚 Novel",
+        "📚 Truyện đang chọn",
         novels,
         index=novels.index(current) if current in novels else 0,
         key="novel_selector_sb",
+        help="Chọn truyện để dịch. Mỗi truyện có data riêng biệt.",
     )
 
     if selected != S.current_novel:
         S.current_novel = selected
         _apply_novel(selected)
-        # Reset page state khi đổi novel
         S.sel_ch  = 0
         S.logs    = []
         S.rt_logs = []
         st.rerun()
     elif not S.current_novel:
-        # Lần đầu load
         S.current_novel = selected
         _apply_novel(selected)
 
 
 def main() -> None:
+    # ── Nếu chưa có API key → hiện welcome screen ────────────────
+    if not _has_api_key():
+        with st.sidebar:
+            st.markdown("## 📖 LiTTrans")
+            st.caption("v5.5 — Thiết lập ban đầu")
+        render_welcome()
+        return
+
     with st.sidebar:
         st.markdown("## 📖 LiTTrans")
-        st.caption("v5.4 — LitRPG / Tu Tiên Pipeline")
+        st.caption("v5.5 — LitRPG / Tu Tiên Pipeline")
         st.divider()
 
-        # ── Novel selector ──────────────────────────────────────
+        # Novel selector
         _render_novel_selector()
         st.divider()
 
-        # ── Navigation ──────────────────────────────────────────
+        # Navigation
         _pages = {
-            "translate" : "📄  Dịch",
-            "chapters"  : "🔍  Xem chương",
-            "characters": "👤  Nhân vật",
-            "glossary"  : "📚  Từ điển",
-            "stats"     : "📊  Thống kê",
-            "settings"  : "⚙️   Cài đặt",
-            "bible"     : "📖  Bible",
-            "epub"      : "📚  EPUB",
+            "translate" : "📄 Dịch",
+            "chapters"  : "🔍 Xem chương",
+            "characters": "👤 Nhân vật",
+            "glossary"  : "📚 Từ điển",
+            "stats"     : "📊 Thống kê",
+            "settings"  : "⚙️ Cài đặt",
+            "bible"     : "📖 Bible System",
+            "epub"      : "📚 EPUB Processor",
         }
         for key, label in _pages.items():
             t = "primary" if S.page == key else "secondary"
@@ -1101,14 +1499,16 @@ def main() -> None:
 
         st.divider()
 
-        # ── Progress & badges ────────────────────────────────────
+        # Progress & status badges
         try:
             chs  = load_chapters(S.current_novel)
             done = sum(1 for c in chs if c["done"])
-            total= len(chs)
+            total = len(chs)
             if total:
                 st.progress(done / total)
                 st.caption(f"{done}/{total} chương")
+            elif S.current_novel:
+                st.caption(f"📁 {S.current_novel}\nChưa có chương nào")
 
             try:
                 from littrans.context.glossary import glossary_stats
@@ -1125,19 +1525,23 @@ def main() -> None:
             pass
 
         if S.running:
-            st.warning("🔄 Pipeline đang chạy…")
+            st.warning("🔄 Đang dịch… đừng đóng cửa sổ.")
         if S.rt_running:
-            st.info("↺ Đang dịch lại…")
+            st.info("↺ Đang dịch lại...")
         if S.clean_running:
-            st.info("🧹 Đang clean…")
+            st.info("🔄 Đang phân loại...")
 
         st.divider()
-        st.caption(f"Root: `{_ROOT.name}`")
-        env_ok = _ENV_PATH.exists()
-        st.caption("✅ .env found" if env_ok else "⚠️  .env chưa có")
+        env_ok = _ENV_PATH.exists() and _has_api_key()
+        if env_ok:
+            st.caption("✅ API key đã cài đặt")
+        else:
+            st.caption("⚠️ Chưa có API key")
+            if st.button("🔑 Cài đặt API Key", key="sidebar_setup"):
+                S.page = "settings"
+                st.rerun()
 
-    # ── Đảm bảo settings luôn đồng bộ với current_novel ──────────
-    # (cần thiết sau Streamlit rerun)
+    # Đảm bảo settings đồng bộ với current_novel
     if S.current_novel:
         try:
             from littrans.config.settings import settings, set_novel

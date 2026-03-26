@@ -538,14 +538,21 @@ class Pipeline:
 
     def _record_violations(self, violations, name_lock, filename) -> None:
         from littrans.utils.io_utils import load_json, save_json as _save
-        # [v5.4] Lưu name_fixes vào novel_data_dir
         fixes_path = settings.novel_data_dir / "name_fixes.json"
         data  = load_json(fixes_path) or {"fixes": {}}
         fixes = data.setdefault("fixes", {})
         for v in violations:
-            m = re.search(r"Tên gốc '(.+?)' còn sót → phải dùng '(.+?)'", v)
-            if not m: continue
+            # FIX: flexible pattern — handles leading spaces, emoji, and arrow variants
+            m = re.search(
+                r"Tên gốc ['\\'\"'](.*?)['\\'\"'] còn sót.*?phải dùng ['\\'\"'](.*?)['\\'\"']",
+                v,
+                re.UNICODE,
+            )
+            if not m:
+                continue
             wrong, correct = m.group(1).strip(), m.group(2).strip()
+            if not wrong or not correct:
+                continue
             if wrong not in fixes:
                 fixes[wrong] = {"correct": correct, "chapters": []}
             entry = fixes[wrong]
@@ -554,6 +561,7 @@ class Pipeline:
             if filename not in entry.get("chapters", []):
                 entry.setdefault("chapters", []).append(filename)
         _save(fixes_path, data)
+
 
     def _print_banner(self, all_files, pending) -> None:
         stats = character_stats()

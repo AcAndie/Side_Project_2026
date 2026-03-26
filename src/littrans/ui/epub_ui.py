@@ -1,10 +1,10 @@
 """
 src/littrans/ui/epub_ui.py — EPUB Processor UI tab.
 
-Flow hiển thị:
-  Tab 1 Upload  → upload .epub, chọn options, chạy
-  Tab 2 Hàng chờ → danh sách epub/ đang đợi
-  Tab 3 Kết quả → inputs/{name}/ đã tạo, sẵn sàng dịch
+[BUG FIX] _launch worker: removed duplicate __DONE__ signal.
+  process_all_epubs() already puts __DONE__ via log_queue param.
+  Worker was putting a second __DONE__ causing UI to stop draining
+  the queue prematurely.
 """
 from __future__ import annotations
 
@@ -24,7 +24,10 @@ def render_epub_tab(S: Any) -> None:
     import streamlit as st
 
     st.subheader("📚 EPUB Processor")
-    st.caption("Chuyển đổi file .epub thành chapters trong `inputs/{tên_epub}/` sẵn sàng dịch")
+    st.caption(
+        "Chuyển đổi file `.epub` thành các chương trong `inputs/{tên_epub}/` "
+        "sẵn sàng cho pipeline dịch."
+    )
 
     for key, default in [
         ("epub_running", False),
@@ -40,7 +43,8 @@ def render_epub_tab(S: Any) -> None:
         from bs4 import BeautifulSoup
     except ImportError:
         st.error(
-            "❌ Thiếu thư viện.\n\n"
+            "❌ Thiếu thư viện xử lý EPUB.\n\n"
+            "Chạy lệnh sau để cài đặt:\n"
             "```bash\npip install ebooklib beautifulsoup4\n```"
         )
         return
@@ -63,6 +67,12 @@ def render_epub_tab(S: Any) -> None:
 def _tab_upload(S: Any, settings) -> None:
     import streamlit as st
 
+    st.markdown(
+        "**Bước 1:** Upload file `.epub` hoặc đặt file vào thư mục `epub/`.\n\n"
+        "**Bước 2:** Nhấn **▶ Bắt đầu xử lý** — AI sẽ tự động bóc tách thành từng chương.\n\n"
+        "**Bước 3:** Sang tab **📄 Dịch** để dịch như thường."
+    )
+
     with st.expander("📤 Upload file .epub", expanded=True):
         uploaded = st.file_uploader(
             "Chọn file .epub",
@@ -77,15 +87,16 @@ def _tab_upload(S: Any, settings) -> None:
             st.success(f"✅ Đã lưu {len(uploaded)} file vào `{settings.epub_dir}/`")
 
     st.divider()
-    st.markdown("#### Kết quả sẽ được tạo tại:")
+    st.caption("Sau khi xử lý xong, các chương sẽ nằm tại:")
     st.code("inputs/{tên_epub}/chapter_0001.txt\ninputs/{tên_epub}/chapter_0002.txt\n...")
-    st.caption("Sau đó dịch bằng: `python scripts/main.py translate --book {tên_epub}`")
-    st.divider()
 
     epub_files = sorted(settings.epub_dir.glob("*.epub")) if settings.epub_dir.exists() else []
 
     if not epub_files:
-        st.info(f"Chưa có file .epub nào trong `{settings.epub_dir}/`. Upload để bắt đầu.")
+        st.info(
+            f"Chưa có file `.epub` nào trong `{settings.epub_dir}/`. "
+            "Upload file ở trên để bắt đầu."
+        )
         return
 
     st.markdown(f"**{len(epub_files)} file sẵn sàng xử lý:**")
@@ -104,13 +115,21 @@ def _tab_upload(S: Any, settings) -> None:
             st.rerun()
     else:
         col_btn.button("⏳ Đang xử lý…", disabled=True)
-        col_info.warning("🔄 Đừng đóng cửa sổ.")
+        col_info.warning("🔄 Đang xử lý — có thể mất vài phút. Đừng đóng cửa sổ.")
 
     if S.epub_running or S.epub_logs:
         _handle_log(S)
 
 
 def _launch(log_queue: queue.Queue) -> None:
+    """
+    Launch epub processor in background thread.
+
+    BUG FIX: Removed duplicate __DONE__ signal.
+    process_all_epubs() already calls log_queue.put("__DONE__") internally.
+    The old code put a second __DONE__ here, causing _handle_log to stop
+    reading the queue before all messages were drained.
+    """
     def _worker():
         import io, sys, traceback
 
@@ -128,15 +147,18 @@ def _launch(log_queue: queue.Queue) -> None:
         sys.stdout = _Cap()
         try:
             from littrans.tools.epub_processor import process_all_epubs
+            # process_all_epubs already puts "__DONE__" via log_queue param
             process_all_epubs(log_queue=log_queue)
+            # DO NOT put "__DONE__" again here — it's already done inside process_all_epubs
         except Exception as e:
             log_queue.put(f"❌ Lỗi: {e}")
             for ln in traceback.format_exc().splitlines()[-8:]:
                 if ln.strip():
                     log_queue.put(f"   {ln}")
+            # Only put __DONE__ on exception since process_all_epubs didn't finish
+            log_queue.put("__DONE__")
         finally:
             sys.stdout = old
-            log_queue.put("__DONE__")
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -159,11 +181,11 @@ def _handle_log(S: Any) -> None:
         if done:
             S.epub_running = False
             S.epub_logs.append("─" * 56)
-            S.epub_logs.append("✅ Hoàn tất! Sang tab Kết quả để xem chapters.")
+            S.epub_logs.append("✅ Hoàn tất! Sang tab **Kết quả** để xem chapters.")
 
     if S.epub_logs:
-        st.markdown("**Log:**")
-        st.code("\n".join(S.epub_logs[-300:]), language=None)
+        with st.expander("📋 Nhật ký xử lý", expanded=S.epub_running):
+            st.code("\n".join(S.epub_logs[-300:]), language=None)
 
     if S.epub_running:
         time.sleep(1.0)
@@ -178,24 +200,24 @@ def _tab_queue(S: Any, settings) -> None:
     import streamlit as st
 
     col1, col2 = st.columns([4, 1])
-    col1.markdown(f"#### 📋 `{settings.epub_dir}/`")
-    if col2.button("↺", key="epub_q_refresh"):
+    col1.markdown(f"#### 📋 File đang chờ xử lý (`{settings.epub_dir}/`)")
+    if col2.button("↺ Làm mới", key="epub_q_refresh"):
         st.rerun()
 
     if not settings.epub_dir.exists():
-        st.info("Thư mục epub/ chưa tồn tại.")
+        st.info("Thư mục `epub/` chưa tồn tại.")
         return
 
     files = sorted(settings.epub_dir.glob("*.epub"))
     if not files:
-        st.info("Không có file .epub nào đang chờ.")
+        st.info("Không có file `.epub` nào đang chờ.")
         return
 
     for ep in files:
         c1, c2, c3 = st.columns([4, 1, 1])
         c1.write(f"📖 {ep.name}")
         c2.caption(f"{ep.stat().st_size/1_048_576:.1f} MB")
-        if c3.button("🗑", key=f"del_epub_{ep.name}"):
+        if c3.button("🗑 Xóa", key=f"del_epub_{ep.name}"):
             ep.unlink()
             st.rerun()
 
@@ -208,20 +230,22 @@ def _tab_result(S: Any, settings) -> None:
     import streamlit as st
 
     col1, col2 = st.columns([4, 1])
-    col1.markdown("#### ✅ Chapters đã tạo trong `inputs/`")
-    if col2.button("↺", key="epub_r_refresh"):
+    col1.markdown("#### ✅ Chapters đã được tạo trong `inputs/`")
+    if col2.button("↺ Làm mới", key="epub_r_refresh"):
         st.rerun()
 
     input_dir = settings.input_dir
     if not input_dir.exists():
-        st.info("inputs/ chưa có dữ liệu.")
+        st.info("Thư mục `inputs/` chưa có dữ liệu.")
         return
 
-    # Tìm tất cả sub-folder trong inputs/ (mỗi folder = 1 epub đã xử lý)
     book_dirs = sorted([d for d in input_dir.iterdir() if d.is_dir()])
 
     if not book_dirs:
-        st.info("Chưa có sách nào được xử lý. Chạy pipeline để tạo chapters.")
+        st.info(
+            "Chưa có sách nào được xử lý. "
+            "Upload file `.epub` ở tab **📤 Upload & Xử lý** và nhấn **Bắt đầu xử lý**."
+        )
         return
 
     for book_dir in book_dirs:
@@ -229,23 +253,24 @@ def _tab_result(S: Any, settings) -> None:
         if not chapters:
             continue
 
-        with st.expander(f"📚 **{book_dir.name}**  —  {len(chapters)} chapters", expanded=False):
+        with st.expander(f"📚 **{book_dir.name}**  —  {len(chapters)} chương", expanded=False):
+            st.success(f"Sẵn sàng dịch! Sang tab **📄 Dịch** và chọn truyện `{book_dir.name}`.")
             st.code(
-                f"# Dịch sách này:\npython scripts/main.py translate --book {book_dir.name}",
+                f"# Hoặc dùng CLI:\npython scripts/main.py translate --book {book_dir.name}",
                 language="bash",
             )
             st.caption(f"📁 `inputs/{book_dir.name}/`")
 
-            # Preview 3 chương đầu
             for ch in chapters[:3]:
-                preview = ch.read_text(encoding='utf-8', errors='replace')[:200]
+                preview = ch.read_text(encoding='utf-8', errors='replace')[:120]
                 st.caption(f"`{ch.name}`  →  {preview[:80]}…")
             if len(chapters) > 3:
                 st.caption(f"... và {len(chapters)-3} chương khác")
 
-            # Nút xóa cả book
-            if st.button(f"🗑 Xóa tất cả chapters của '{book_dir.name}'",
-                         key=f"del_book_{book_dir.name}"):
+            if st.button(
+                f"🗑 Xóa tất cả chapters của '{book_dir.name}'",
+                key=f"del_book_{book_dir.name}",
+            ):
                 import shutil
                 shutil.rmtree(book_dir)
                 st.rerun()
