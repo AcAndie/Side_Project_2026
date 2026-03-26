@@ -26,7 +26,7 @@ from littrans.context.skills     import load_skills_for_chapter, add_skill_updat
 from littrans.context.name_lock  import build_name_lock_table, validate_translation, lock_stats
 from littrans.context.memory     import load_recent as load_arc_memory
 from littrans.core.scout         import run as scout_run, should_refresh, load_context_notes
-from littrans.core.prompt_builder  import build as build_prompt, build_translation_prompt
+from littrans.core.prompt_builder import build_translation_prompt
 from littrans.core.quality_guard   import check as quality_check
 from littrans.llm.client import (
     call_translation,
