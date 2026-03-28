@@ -1,10 +1,15 @@
 """
 src/littrans/llm/client.py — Gemini API client + Multi-Key Pool + Anthropic dispatcher.
 
-[v4.5] Dual-Model support.
-[v4.6] Timeout: API_TIMEOUT=90s + _call_with_timeout() wrapper.
-[v5.5] DUP-6 fix: token logging tập trung vào _try_log_usage().
-       DEAD-1 fix: xoá call_gemini() (structured-output flow cũ, không còn dùng).
+[FIX BUG-1] ApiKeyPool.on_rate_limit() nhận failed_key thay vì tự lấy current_key.
+            Tránh race condition khi nhiều thread cùng báo lỗi.
+
+[FIX BUG-2] Bỏ ThreadPoolExecutor wrapper (_call_with_timeout).
+            Dùng http_options={'timeout': API_TIMEOUT} trực tiếp trong genai.Client
+            → SDK tự xử lý timeout, không sinh worker thread bị leak.
+
+[FIX BUG-5] handle_api_error() được gọi trong mọi call function của Gemini,
+            truyền đúng failed_key về pool.
 """
 from __future__ import annotations
 
@@ -12,16 +17,13 @@ import re
 import json
 import logging
 import threading
-import concurrent.futures
-from pydantic import ValidationError
 from google import genai
 from google.genai import types
 
 from littrans.config.settings import settings
 from littrans.llm.schemas import TranslationResult, GEMINI_SCHEMA
 
-
-# ── Timeout cho mọi API call ──────────────────────────────────────
+# Timeout cho mọi API call (giây) — áp vào http_options của SDK
 API_TIMEOUT: int = 90
 
 
@@ -31,48 +33,6 @@ API_TIMEOUT: int = 90
 
 class AllKeysExhaustedError(Exception):
     """Tất cả API key đều hết quota."""
-
-
-# ═══════════════════════════════════════════════════════════════════
-# TIMEOUT WRAPPER
-# ═══════════════════════════════════════════════════════════════════
-
-def _call_with_timeout(fn, timeout: int = API_TIMEOUT):
-    """Chạy fn() trong thread riêng, raise TimeoutError nếu quá hạn."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(fn)
-        try:
-            return future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            raise TimeoutError(
-                f"API call timed out sau {timeout}s — "
-                "kiểm tra kết nối mạng hoặc tăng API_TIMEOUT trong client.py."
-            )
-
-
-# ═══════════════════════════════════════════════════════════════════
-# TOKEN LOGGING HELPER
-# ═══════════════════════════════════════════════════════════════════
-
-def _try_log_usage(response) -> None:
-    """Ghi log token usage nếu response có usage_metadata (Gemini) hoặc usage (Anthropic)."""
-    # Gemini
-    if hasattr(response, "usage_metadata") and response.usage_metadata:
-        u = response.usage_metadata
-        _log_tokens(
-            getattr(u, "prompt_token_count", "?"),
-            getattr(u, "candidates_token_count", "?"),
-            getattr(u, "total_token_count", "?"),
-        )
-        return
-    # Anthropic
-    if hasattr(response, "usage") and response.usage:
-        u = response.usage
-        _log_tokens(
-            getattr(u, "input_tokens", "?"),
-            getattr(u, "output_tokens", "?"),
-            "—",
-        )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -91,7 +51,15 @@ class ApiKeyPool:
         self._errors    = {k: 0 for k in api_keys}
         self._dead      = {k: False for k in api_keys}
         self._lock      = threading.Lock()
-        self._clients   = {k: genai.Client(api_key=k) for k in api_keys}
+        # [FIX BUG-2] Thêm http_options timeout vào Client — SDK tự handle,
+        # không cần ThreadPoolExecutor wrapper nữa.
+        self._clients   = {
+            k: genai.Client(
+                api_key=k,
+                http_options={"timeout": API_TIMEOUT},
+            )
+            for k in api_keys
+        }
 
     @property
     def current_key(self) -> str:
@@ -105,13 +73,18 @@ class ApiKeyPool:
         with self._lock:
             self._errors[self.current_key] = 0
 
-    def on_rate_limit(self) -> None:
+    # [FIX BUG-1] Nhận failed_key thay vì tự lấy self.current_key.
+    # Lý do: giữa lúc thread A gặp lỗi và bắt đầu xử lý on_rate_limit(),
+    # thread B có thể đã rotate key → self.current_key trỏ sai.
+    def on_rate_limit(self, failed_key: str | None = None) -> None:
         with self._lock:
-            key = self.current_key
+            key = failed_key if failed_key else self.current_key
             self._errors[key] += 1
             if self._errors[key] > self._threshold:
                 self._dead[key] = True
-                logging.warning(f"[ApiKeyPool] Key #{self._idx} đạt ngưỡng lỗi — rotate")
+                logging.warning(
+                    f"[ApiKeyPool] Key ...{key[-4:]} đạt ngưỡng lỗi — rotate"
+                )
                 self._rotate()
 
     def _rotate(self) -> None:
@@ -158,14 +131,43 @@ def _get_anthropic_client():
             import anthropic
         except ImportError:
             raise ImportError(
-                "❌ Cần cài anthropic SDK: pip install anthropic\n"
-                "   Hoặc: pip install 'littrans[anthropic]'"
+                "❌ Cần cài anthropic SDK: pip install anthropic"
             )
         _anthropic_client = anthropic.Anthropic(
             api_key=settings.anthropic_api_key,
             timeout=float(API_TIMEOUT),
         )
         return _anthropic_client
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TOKEN LOGGING HELPER
+# ═══════════════════════════════════════════════════════════════════
+
+def _try_log_usage(response) -> None:
+    if hasattr(response, "usage_metadata") and response.usage_metadata:
+        u = response.usage_metadata
+        _log_tokens(
+            getattr(u, "prompt_token_count", "?"),
+            getattr(u, "candidates_token_count", "?"),
+            getattr(u, "total_token_count", "?"),
+        )
+        return
+    if hasattr(response, "usage") and response.usage:
+        u = response.usage
+        _log_tokens(
+            getattr(u, "input_tokens", "?"),
+            getattr(u, "output_tokens", "?"),
+            "—",
+        )
+
+
+def _log_tokens(inp, out, total) -> None:
+    try:
+        from tqdm import tqdm
+        tqdm.write(f"  📊 Tokens — input: {inp} | output: {out} | total: {total}")
+    except Exception:
+        print(f"  📊 Tokens — input: {inp} | output: {out} | total: {total}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -194,9 +196,10 @@ def call_gemini_translation(system_prompt: str, chapter_text: str) -> str:
         if settings.translation_provider == "gemini"
         else settings.gemini_model
     )
-
-    def _do():
-        return key_pool.current_client.models.generate_content(
+    # [FIX BUG-1] Chụp key TRƯỚC khi gọi API
+    used_key = key_pool.current_key
+    try:
+        response = key_pool.current_client.models.generate_content(
             model=model,
             contents=chapter_text,
             config=types.GenerateContentConfig(
@@ -204,50 +207,45 @@ def call_gemini_translation(system_prompt: str, chapter_text: str) -> str:
                 temperature=0.4,
             ),
         )
-
-    response = _call_with_timeout(_do)
-    _try_log_usage(response)
-
-    text = response.text or ""
-    if not text.strip():
-        raise ValueError("Translation call trả về text rỗng.")
-
-    key_pool.on_success()
-    return text
+        _try_log_usage(response)
+        text = response.text or ""
+        if not text.strip():
+            raise ValueError("Translation call trả về text rỗng.")
+        key_pool.on_success()
+        return text
+    except Exception as exc:
+        # [FIX BUG-5] Luôn gọi handle_api_error với đúng key đã dùng
+        handle_api_error(exc, failed_key=used_key)
+        raise
 
 
 def call_anthropic_translation(system_prompt: str, chapter_text: str) -> str:
     """Anthropic (Claude) Trans-call — plain text output."""
     client = _get_anthropic_client()
     model  = settings.translation_model
-
-    def _do():
-        return client.messages.create(
-            model=model,
-            max_tokens=8096,
-            temperature=1,
-            system=system_prompt,
-            messages=[{"role": "user", "content": chapter_text}],
-        )
-
-    response = _call_with_timeout(_do)
+    response = client.messages.create(
+        model=model,
+        max_tokens=8096,
+        temperature=1,
+        system=system_prompt,
+        messages=[{"role": "user", "content": chapter_text}],
+    )
     _try_log_usage(response)
-
     text = ""
     for block in response.content:
         if hasattr(block, "text"):
             text += block.text
-
     if not text.strip():
         raise ValueError("Anthropic translation call trả về text rỗng.")
-
     return text
 
 
 def call_gemini_text(system_prompt: str, user_text: str) -> str:
     """Scout, Arc Memory — plain text, luôn dùng Gemini."""
-    def _do():
-        return key_pool.current_client.models.generate_content(
+    # [FIX BUG-1+5] Chụp key trước, truyền vào handle_api_error khi lỗi
+    used_key = key_pool.current_key
+    try:
+        response = key_pool.current_client.models.generate_content(
             model=settings.gemini_model,
             contents=user_text,
             config=types.GenerateContentConfig(
@@ -255,23 +253,22 @@ def call_gemini_text(system_prompt: str, user_text: str) -> str:
                 temperature=0.2,
             ),
         )
-
-    response = _call_with_timeout(_do)
-    key_pool.on_success()
-    return response.text or ""
+        key_pool.on_success()
+        return response.text or ""
+    except Exception as exc:
+        handle_api_error(exc, failed_key=used_key)
+        raise
 
 
 def call_gemini_json(system_prompt: str, user_text: str) -> dict:
     """
     Emotion Tracker, clean_glossary, Pre-call, Post-call, Bible scan — JSON tự do.
     Luôn dùng Gemini.
-
-    Xử lý trường hợp AI trả về JSON array thay vì object:
-      - [...] với 1 dict element  → unwrap, trả về dict đó
-      - [] hoặc không có dict     → trả về {}
     """
-    def _do():
-        return key_pool.current_client.models.generate_content(
+    # [FIX BUG-1+5] Chụp key trước, truyền vào handle_api_error khi lỗi
+    used_key = key_pool.current_key
+    try:
+        response = key_pool.current_client.models.generate_content(
             model=settings.gemini_model,
             contents=user_text,
             config=types.GenerateContentConfig(
@@ -280,9 +277,10 @@ def call_gemini_json(system_prompt: str, user_text: str) -> dict:
                 response_mime_type="application/json",
             ),
         )
-
-    response = _call_with_timeout(_do)
-    key_pool.on_success()
+        key_pool.on_success()
+    except Exception as exc:
+        handle_api_error(exc, failed_key=used_key)
+        raise
 
     raw   = response.text or "{}"
     clean = re.sub(r"^```json\s*|```\s*$", "", raw.strip(), flags=re.MULTILINE)
@@ -320,17 +318,8 @@ def is_rate_limit(exc: Exception) -> bool:
                                    "overloaded", "529"))
 
 
-def handle_api_error(exc: Exception) -> None:
+# [FIX BUG-1+5] Nhận failed_key để truyền đúng vào on_rate_limit()
+def handle_api_error(exc: Exception, failed_key: str | None = None) -> None:
     if is_rate_limit(exc):
         if not settings.using_anthropic:
-            key_pool.on_rate_limit()
-
-
-# ── Private helpers ───────────────────────────────────────────────
-
-def _log_tokens(inp, out, total) -> None:
-    try:
-        from tqdm import tqdm
-        tqdm.write(f"  📊 Tokens — input: {inp} | output: {out} | total: {total}")
-    except Exception:
-        print(f"  📊 Tokens — input: {inp} | output: {out} | total: {total}")
+            key_pool.on_rate_limit(failed_key)

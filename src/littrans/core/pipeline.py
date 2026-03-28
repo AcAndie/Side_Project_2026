@@ -414,8 +414,14 @@ class Pipeline:
                 print(f"  ⚠️  Bible update lỗi: {_e}")
 
         # ── Update data từ Post-call metadata ─────────────────────
-        if not skip_data_update and post_result.ok:
-            self._update_data_from_post(post_result, filename, chapter_index, char_profiles)
+        if not skip_data_update:
+            if post_result.ok:
+                self._update_data_from_post(post_result, filename, chapter_index, char_profiles)
+            else:
+                # [FIX BUG-3] Vẫn lưu terms+skills dù post-call lỗi
+                self._update_data_fallback(post_result, filename)
+
+
 
         # [FIX] Guard: touch_seen vô nghĩa khi bible mode (char_profiles rỗng)
         if char_profiles:
@@ -447,6 +453,40 @@ class Pipeline:
                 print(f"  👤 Nhân vật mới: {n_chars} → {dest}")
             if n_rels:
                 print(f"  🔗 Quan hệ cập nhật: {n_rels}")
+
+    def _update_data_fallback(self, post_result, filename: str) -> None:
+        """
+        [FIX BUG-3] Lưu partial data khi post-call không thành công (ok=False).
+        Chỉ lưu new_terms + skill_updates — an toàn vì không cần xác thực context.
+        Bỏ qua new_characters để tránh lưu nhân vật sai do thiếu thông tin.
+        """
+        saved_anything = False
+ 
+        try:
+            term_objects = _parse_list(post_result.new_terms, TermDetail, "TermDetail[fallback]")
+            if term_objects:
+                n = add_new_terms(term_objects, filename)
+                if n:
+                    print(f"  📝 [Fallback] Thuật ngữ mới: {n} (post-call lỗi)")
+                    saved_anything = True
+        except Exception as e:
+            logging.warning(f"[Pipeline/fallback] terms {filename}: {e}")
+ 
+        try:
+            skill_objects = _parse_list(post_result.skill_updates, SkillUpdate, "SkillUpdate[fallback]")
+            if skill_objects:
+                n = add_skill_updates(skill_objects, filename)
+                if n:
+                    print(f"  ⚔️  [Fallback] Kỹ năng mới: {n} (post-call lỗi)")
+                    saved_anything = True
+        except Exception as e:
+            logging.warning(f"[Pipeline/fallback] skills {filename}: {e}")
+ 
+        if not saved_anything:
+            print(f"  ⚠️  [Fallback] Post-call lỗi, không có data để lưu từ {filename}")
+        else:
+            print(f"  ✅ [Fallback] Đã lưu partial data từ {filename} (nhân vật cần merge thủ công)")
+
 
     # ── Helpers ───────────────────────────────────────────────────
 
