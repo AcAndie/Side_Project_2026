@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.backends.legacy:build"
 
 [project]
-name = "littrans"
-version = "4.5.0"
-description = "LitRPG / Tu Tiên translation pipeline powered by Gemini"
+name = "novelpipeline"
+version = "1.0.0"
+description = "Novel scraping, EPUB processing, and translation pipeline"
 requires-python = ">=3.11"
 dependencies = [
     "google-genai>=1.0",
@@ -14,12 +14,15 @@ dependencies = [
     "typer[all]>=0.12",
     "tqdm>=4.0",
     "filelock>=3.12",
+    "curl-cffi>=0.6.0",
+    "playwright>=1.40.0",
+    "beautifulsoup4>=4.12",
+    "lxml>=4.9",
+    "ebooklib>=0.18",
 ]
 
 [project.optional-dependencies]
 fast = ["pyahocorasick>=2.0"]
-epub = ["ebooklib>=0.18", "beautifulsoup4>=4.12"]
-all  = ["pyahocorasick>=2.0", "ebooklib>=0.18", "beautifulsoup4>=4.12"]
 
 [project.scripts]
 littrans = "littrans.cli:app"

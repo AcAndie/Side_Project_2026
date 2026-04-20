@@ -115,8 +115,8 @@ class ApiKeyPool:
         }
 
 
-# Singleton Gemini pool
-key_pool = ApiKeyPool(settings.gemini_api_keys, rotate_threshold=settings.key_rotate_threshold)
+# Singleton Gemini pool — dùng all_gemini_keys để scan GEMINI_API_KEY_N
+key_pool = ApiKeyPool(settings.all_gemini_keys, rotate_threshold=settings.key_rotate_threshold)
 
 
 # ═══════════════════════════════════════════════════════════════════

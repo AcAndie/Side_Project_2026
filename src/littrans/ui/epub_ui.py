@@ -87,8 +87,20 @@ def _tab_upload(S: Any, settings) -> None:
             st.success(f"✅ Đã lưu {len(uploaded)} file vào `{settings.epub_dir}/`")
 
     st.divider()
-    st.caption("Sau khi xử lý xong, các chương sẽ nằm tại:")
-    st.code("inputs/{tên_epub}/chapter_0001.txt\ninputs/{tên_epub}/chapter_0002.txt\n...")
+    output_mode = st.radio(
+        "Output format",
+        ["per_chapter", "merged"],
+        format_func=lambda x: "📄 Per-chapter .md (mặc định — cho Dịch)" if x == "per_chapter"
+                               else "📋 Merged .md (1 file gộp toàn sách)",
+        horizontal=True,
+        key="epub_output_mode",
+    )
+    if output_mode == "per_chapter":
+        st.caption("Sau khi xử lý xong, các chương sẽ nằm tại:")
+        st.code("inputs/{tên_epub}/0001_Chapter_Title.md\ninputs/{tên_epub}/0002_Chapter_Title.md\n...")
+    else:
+        st.caption("Sau khi xử lý xong, file gộp sẽ nằm tại:")
+        st.code("epub_merged/{tên_epub}.md")
 
     epub_files = sorted(settings.epub_dir.glob("*.epub")) if settings.epub_dir.exists() else []
 
@@ -110,7 +122,7 @@ def _tab_upload(S: Any, settings) -> None:
         if col_btn.button("▶ Bắt đầu xử lý", type="primary"):
             S.epub_logs = []
             S.epub_q    = queue.Queue()
-            _launch(S.epub_q)
+            _launch(S.epub_q, output_mode=S.get("epub_output_mode", "per_chapter"))
             S.epub_running = True
             st.rerun()
     else:
@@ -121,7 +133,7 @@ def _tab_upload(S: Any, settings) -> None:
         _handle_log(S)
 
 
-def _launch(log_queue: queue.Queue) -> None:
+def _launch(log_queue: queue.Queue, output_mode: str = "per_chapter") -> None:
     """
     Launch epub processor in background thread.
 
@@ -148,7 +160,7 @@ def _launch(log_queue: queue.Queue) -> None:
         try:
             from littrans.tools.epub_processor import process_all_epubs
             # process_all_epubs already puts "__DONE__" via log_queue param
-            process_all_epubs(log_queue=log_queue)
+            process_all_epubs(log_queue=log_queue, output_mode=output_mode)
             # DO NOT put "__DONE__" again here — it's already done inside process_all_epubs
         except Exception as e:
             log_queue.put(f"❌ Lỗi: {e}")
@@ -249,7 +261,7 @@ def _tab_result(S: Any, settings) -> None:
         return
 
     for book_dir in book_dirs:
-        chapters = sorted(book_dir.glob("*.txt"))
+        chapters = sorted([*book_dir.glob("*.txt"), *book_dir.glob("*.md")])
         if not chapters:
             continue
 

@@ -33,6 +33,7 @@ import time
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from tqdm import tqdm
 
@@ -189,6 +190,13 @@ def _load_prompt(path: Path) -> str:
     except FileNotFoundError:
         logging.error(f"[EpubProcessor] Không tìm thấy prompt: {path}")
         return ""
+
+
+def _slugify_title(title: str) -> str:
+    """Convert chapter title to safe filename component (max 60 chars)."""
+    s = re.sub(r'[<>:"/\\|?*\n\r\t]', '', title)
+    s = re.sub(r'[\s\-]+', '_', s).strip('_')
+    return s[:60] or "chapter"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -408,35 +416,47 @@ class EpubResult:
 def process_epub(
     epub_path   : str | Path,
     log_queue   = None,
+    output_mode : Literal["per_chapter", "merged"] = "per_chapter",
+    novel_name  : str | None = None,
 ) -> EpubResult:
     """
     Xử lý một file EPUB.
 
-    Input  : epub/{name}.epub
-    Output : inputs/{name}/chapter_0001.txt, chapter_0002.txt, ...
-
-    log_queue: nếu có, stdout được đưa vào queue để UI stream.
+    Params:
+      epub_path   — đường dẫn file .epub
+      log_queue   — nếu có, stdout đưa vào queue để UI stream
+      output_mode — "per_chapter": inputs/{name}/NNNN_Title.md (mặc định)
+                    "merged": epub_merged/{name}.md (1 file gộp)
+      novel_name  — tên folder đích trong inputs/ (mặc định = epub filename stem)
     """
     _require_epub_deps()
     ebooklib, epub_lib, _ = _require_epub_deps()
 
-    settings  = _get_settings()
-    epub_path = Path(epub_path)
-    epub_name = epub_path.stem
+    settings       = _get_settings()
+    epub_path      = Path(epub_path)
+    epub_name      = epub_path.stem
+    effective_name = novel_name or epub_name
 
     # ── Paths ──────────────────────────────────────────────────────
-    # inputs/{epub_name}/  — output cuối cùng
-    chapter_dir = settings.input_dir / epub_name
-    # Temp_Raw_TXT/{epub_name}/  — file tạm
+    # inputs/{effective_name}/  — per_chapter output
+    chapter_dir = settings.input_dir / effective_name
+    # epub_merged/{effective_name}.md  — merged output
+    merged_path = settings.base_dir / "epub_merged" / f"{effective_name}.md"
+    # Temp_Raw_TXT/{epub_name}/  — file tạm (keyed by epub_name to survive renames)
     temp_dir    = settings.epub_temp_dir / epub_name
     # Images/{epub_name}/
     images_dir  = settings.epub_images_dir / epub_name
 
-    chapter_dir.mkdir(parents=True, exist_ok=True)
+    if output_mode == "per_chapter":
+        chapter_dir.mkdir(parents=True, exist_ok=True)
+        output_dir_str = str(chapter_dir)
+    else:
+        merged_path.parent.mkdir(parents=True, exist_ok=True)
+        output_dir_str = str(merged_path.parent)
     temp_dir.mkdir(parents=True, exist_ok=True)
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    result           = EpubResult(epub_name=epub_name, output_dir=str(chapter_dir))
+    result           = EpubResult(epub_name=effective_name, output_dir=output_dir_str)
     ai_count         = 0
     code_count       = 0
 
@@ -448,7 +468,10 @@ def process_epub(
 
     _log(f"\n{'='*55}")
     _log(f"  ĐANG XỬ LÝ: {epub_name}")
-    _log(f"  Output: inputs/{epub_name}/")
+    if output_mode == "per_chapter":
+        _log(f"  Output: inputs/{effective_name}/ (per-chapter .md)")
+    else:
+        _log(f"  Output: epub_merged/{effective_name}.md (merged)")
     _log(f"{'='*55}")
 
     # ── Tải prompts ────────────────────────────────────────────────
@@ -548,8 +571,15 @@ def process_epub(
     _log("\n[Phase 1.5] AI học pattern rác...")
     ruleset = _learn_patterns(raw_files, learner_prompt)
 
-    # ── Phase 2: Làm sạch & ghi chapters vào inputs/{name}/ ────────
-    _log(f"\n[Phase 2] Làm sạch → inputs/{epub_name}/")
+    # ── Phase 2: Làm sạch & ghi chapters ──────────────────────────
+    if output_mode == "per_chapter":
+        _log(f"\n[Phase 2] Làm sạch → inputs/{effective_name}/")
+    else:
+        _log(f"\n[Phase 2] Làm sạch → epub_merged/{effective_name}.md")
+        # Fresh start: ghi header
+        with merged_path.open('w', encoding='utf-8') as _mf:
+            _mf.write(f"# {effective_name}\n\n---\n")
+
 
     for file_path in tqdm(raw_files, desc="  Làm sạch", unit="chương"):
         content = Path(file_path).read_text(encoding='utf-8')
@@ -589,12 +619,17 @@ def process_epub(
             result.chapters_skipped += 1
             continue
 
-        # Ghi ra inputs/{epub_name}/chapter_NNNN.txt
-        out_file = chapter_dir / f"chapter_{ch_num:04d}.txt"
-        out_file.write_text(
-            f"# {title}\n\n{cleaned.strip()}\n",
-            encoding='utf-8',
-        )
+        # ── Ghi output ──────────────────────────────────────────
+        if output_mode == "per_chapter":
+            slug = _slugify_title(title)
+            out_file = chapter_dir / f"{ch_num:04d}_{slug}.md"
+            out_file.write_text(
+                f"# {title}\n\n{cleaned.strip()}\n",
+                encoding='utf-8',
+            )
+        else:
+            with merged_path.open('a', encoding='utf-8') as _mf:
+                _mf.write(f"\n\n## {title}\n\n{cleaned.strip()}\n")
 
         # Xóa file tạm SAU KHI ghi thành công
         try:
@@ -620,14 +655,20 @@ def process_epub(
     _log(
         f"\n  📊 {code_count}/{total} code-only | {ai_count}/{total} AI-assisted"
     )
-    _log(
-        f"  ✅ {result.chapters_written} chapters → inputs/{epub_name}/\n"
-        f"     Dịch: python scripts/main.py translate --book {epub_name}"
-    )
+    if output_mode == "per_chapter":
+        _log(
+            f"  ✅ {result.chapters_written} chapters → inputs/{effective_name}/\n"
+            f"     Dịch: python scripts/main.py translate --book {effective_name}"
+        )
+    else:
+        _log(f"  ✅ {result.chapters_written} chapters → epub_merged/{effective_name}.md")
     return result
 
 
-def process_all_epubs(log_queue=None) -> list[EpubResult]:
+def process_all_epubs(
+    log_queue   = None,
+    output_mode : Literal["per_chapter", "merged"] = "per_chapter",
+) -> list[EpubResult]:
     """Xử lý tất cả .epub trong epub/ folder."""
     settings  = _get_settings()
     epub_dir  = settings.epub_dir
@@ -644,7 +685,7 @@ def process_all_epubs(log_queue=None) -> list[EpubResult]:
 
     results = []
     for ep in epub_files:
-        r = process_epub(ep, log_queue=log_queue)
+        r = process_epub(ep, log_queue=log_queue, output_mode=output_mode)
         results.append(r)
 
     if log_queue:

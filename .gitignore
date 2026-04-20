@@ -8,6 +8,8 @@ inputs/
 outputs/
 data/
 logs/
+progress/
+issues.md
 
 # ── Bible System runtime files ────────────────────────────────────
 # Lock file tạo ra khi consolidation đang chạy
@@ -40,6 +42,7 @@ venv/
 .idea/
 *.DS_Store
 Thumbs.db
+.claude/
 
 # ── Docs ──────────────────────────────────────────────────────────
 CHANGELOG.md

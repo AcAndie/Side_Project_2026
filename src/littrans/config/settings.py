@@ -9,6 +9,7 @@ Chỉnh qua .env, KHÔNG sửa file này.
 """
 from __future__ import annotations
 
+import re
 import sys
 import logging
 import threading
@@ -19,6 +20,8 @@ from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
 
 import os
+
+_GEMINI_KEY_PATTERN = re.compile(r"^GEMINI_API_KEY_\d+$")
 
 def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
@@ -122,6 +125,15 @@ class Settings:
     epub_dir_raw        : str  = field(default_factory=lambda: _env("EPUB_DIR",        "epub"))
     epub_images_dir_raw : str  = field(default_factory=lambda: _env("EPUB_IMAGES_DIR", "epub_images"))
     epub_temp_dir_raw   : str  = field(default_factory=lambda: _env("EPUB_TEMP_DIR",   "epub_temp"))
+
+    # ── Scraper settings ──────────────────────────────────────────
+    scraper_max_pw_instances     : int  = field(default_factory=lambda: _env_int("SCRAPER_MAX_PW_INSTANCES", 2))
+    scraper_ai_max_rpm           : int  = field(default_factory=lambda: _env_int("SCRAPER_AI_MAX_RPM", 10))
+    scraper_profile_max_age_days : int  = field(default_factory=lambda: _env_int("SCRAPER_PROFILE_MAX_AGE_DAYS", 30))
+    scraper_max_chapters         : int  = field(default_factory=lambda: _env_int("SCRAPER_MAX_CHAPTERS", 5000))
+    scraper_max_consecutive_errors: int = field(default_factory=lambda: _env_int("SCRAPER_MAX_CONSECUTIVE_ERRORS", 5))
+    scraper_fast_learning        : bool = field(default_factory=lambda: _env_bool("SCRAPER_FAST_LEARNING", False))
+    scraper_validation           : bool = field(default_factory=lambda: _env_bool("SCRAPER_VALIDATION", True))
 
     # ── Known valid model names (soft validation only) ────────────
     _KNOWN_ANTHROPIC_MODELS = frozenset({
@@ -356,8 +368,39 @@ class Settings:
         return [k for k in [self.gemini_api_key, self.fallback_key_1, self.fallback_key_2] if k]
 
     @property
+    def all_gemini_keys(self) -> list[str]:
+        """Hợp nhất gemini_api_key, fallback_key_1/2, và scan GEMINI_API_KEY_N (strict regex)."""
+        keys: list[str] = []
+        for k in [self.gemini_api_key, self.fallback_key_1, self.fallback_key_2]:
+            if k and k not in keys:
+                keys.append(k)
+        for name, value in sorted(os.environ.items()):
+            if _GEMINI_KEY_PATTERN.match(name) and value and value not in keys:
+                keys.append(value)
+        return keys
+
+    @property
     def using_anthropic(self) -> bool:
         return self.translation_provider == "anthropic"
+
+    # ── Scraper paths ──────────────────────────────────────────────
+
+    @property
+    def base_dir(self) -> Path:
+        """Root dir của NovelPipeline repo (nơi chứa inputs/, outputs/, data/)."""
+        return self.input_dir.parent
+
+    @property
+    def scraper_profiles_file(self) -> Path:
+        return self.data_dir / "site_profiles.json"
+
+    @property
+    def scraper_ads_keywords_file(self) -> Path:
+        return self.data_dir / "ads_keywords.json"
+
+    @property
+    def scraper_progress_dir(self) -> Path:
+        return self.base_dir / "progress"
 
 
 # ── Singleton ─────────────────────────────────────────────────────

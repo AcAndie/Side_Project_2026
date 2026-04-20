@@ -33,8 +33,10 @@ for _p in [str(_ROOT), str(_ROOT / "src")]:
         sys.path.insert(0, _p)
 
 import streamlit as st
-from littrans.ui.bible_ui import render_bible_tab as render_bible
-from littrans.ui.epub_ui  import render_epub_tab  as render_epub
+from littrans.ui.bible_ui     import render_bible_tab   as render_bible
+from littrans.ui.epub_ui      import render_epub_tab    as render_epub
+from littrans.ui.scraper_page  import render_scraper
+from littrans.ui.pipeline_page import render_pipeline
 import streamlit.components.v1 as components
 
 st.set_page_config(
@@ -77,6 +79,25 @@ _DEFAULTS: dict[str, Any] = {
     "epub_q"                : None,
     "epub_logs"             : [],
     "last_export_file"      : None,
+    # EPUB Export
+    "epub_export_bytes" : None,
+    "epub_export_novel" : "",
+    # Pipeline
+    "pipeline_running"  : False,
+    "pipeline_q"        : None,
+    "pipeline_logs"     : [],
+    "pipeline_stage"    : 0,
+    "_pl_mode"          : "",
+    "_pl_novel_name"    : "",
+    "_pl_result_holder" : [],
+    "_pl_epub_path"     : "",
+    # Scraper
+    "scraper_running"           : False,
+    "scraper_q"                 : None,
+    "scraper_logs"              : [],
+    "scraper_result"            : None,
+    "_scraper_result_holder"    : [],
+    "_scraper_novel_name"       : "",
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -509,6 +530,53 @@ def render_translate() -> None:
             _show_log(S.logs)
         if S.running:
             time.sleep(0.9); st.rerun()
+
+    # ── EPUB Export ───────────────────────────────────────────────
+    translated = [c for c in chapters if c["done"]]
+    if translated and not S.running:
+        st.divider()
+        with st.expander("📖 Xuất EPUB", expanded=False):
+            import io as _io
+            st.caption(f"{len(translated)} chương đã dịch sẵn sàng xuất EPUB.")
+            c1, c2 = st.columns(2)
+            epub_title  = c1.text_input(
+                "Tiêu đề", key="epub_exp_title",
+                value=S.current_novel.replace("_", " ").title() if S.current_novel else "",
+            )
+            epub_author = c2.text_input("Tác giả", value="Unknown", key="epub_exp_author")
+
+            if st.button("🔄 Tạo EPUB", key="epub_gen_btn"):
+                try:
+                    from littrans.tools.epub_exporter import (
+                        export_to_epub, EpubExportMeta, get_translated_chapters,
+                    )
+                    chaps = get_translated_chapters(S.current_novel)
+                    if not chaps:
+                        st.error("Không tìm thấy file *_VN.txt trong outputs/")
+                    else:
+                        buf = _io.BytesIO()
+                        export_to_epub(
+                            chaps, buf,
+                            EpubExportMeta(
+                                title=epub_title or S.current_novel,
+                                author=epub_author or "Unknown",
+                            ),
+                        )
+                        S["epub_export_bytes"] = buf.getvalue()
+                        S["epub_export_novel"] = S.current_novel
+                        st.success(f"✅ EPUB từ {len(chaps)} chương. Nhấn Download bên dưới.")
+                except Exception as _exc:
+                    st.error(f"❌ Lỗi xuất EPUB: {_exc}")
+
+            if S.get("epub_export_bytes") and S.get("epub_export_novel") == S.current_novel:
+                fname = f"{S.current_novel or 'novel'}.epub"
+                st.download_button(
+                    "⬇️ Download EPUB",
+                    data=S["epub_export_bytes"],
+                    file_name=fname,
+                    mime="application/epub+zip",
+                    key="epub_dl_btn",
+                )
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1244,6 +1312,8 @@ def main() -> None:
         st.divider()
 
         _pages = {
+            "pipeline"  : "🚀 Pipeline",
+            "scraper"   : "🌐 Cào Truyện",
             "translate" : "📄 Dịch",
             "chapters"  : "🔍 Xem chương",
             "characters": "👤 Nhân vật",
@@ -1299,6 +1369,8 @@ def main() -> None:
 
         # Running indicators
         for flag, msg in [
+            (S.pipeline_running,     "🚀 Đang pipeline…"),
+            (S.scraper_running,      "🌐 Đang cào…"),
             (S.running,              "🔄 Đang dịch…"),
             (S.rt_running,           "↺ Đang dịch lại…"),
             (S.clean_running,        "🔄 Đang phân loại…"),
@@ -1325,6 +1397,8 @@ def main() -> None:
             pass
 
     _route = {
+        "pipeline"  : lambda: render_pipeline(S),
+        "scraper"   : lambda: render_scraper(S),
         "translate" : render_translate,
         "chapters"  : render_chapters,
         "characters": render_characters,
