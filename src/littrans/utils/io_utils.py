@@ -35,6 +35,17 @@ def load_json(filepath: str | Path) -> dict:
         return {}
 
 
+def load_json_safe(filepath: str | Path, default=None):
+    """Load JSON with explicit default on missing file or parse error."""
+    p = Path(filepath)
+    if not p.exists():
+        return default
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return default
+
+
 def save_json(filepath: str | Path, data: dict) -> None:
     atomic_write(str(filepath), json.dumps(data, ensure_ascii=False, indent=2))
 

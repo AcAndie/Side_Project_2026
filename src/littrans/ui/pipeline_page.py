@@ -235,23 +235,18 @@ def _launch(
 
 def _handle_log(S: Any) -> None:
     import streamlit as st
+    from littrans.ui.runner import poll_queue
 
     if S.pipeline_running:
-        q    = S.pipeline_q
-        done = False
-        while True:
-            try:
-                msg = q.get_nowait()
-                if msg == "__DONE__":
-                    done = True
-                elif msg == "__STAGE_2__":
-                    S["pipeline_stage"] = 2
-                elif msg == "__STAGE_DONE__":
-                    S["pipeline_stage"] = 99
-                else:
-                    S.pipeline_logs.append(msg)
-            except queue.Empty:
-                break
+        done, extras = poll_queue(
+            S.pipeline_q, S.pipeline_logs,
+            extra_markers=("__STAGE_2__", "__STAGE_DONE__"),
+        )
+        for m in extras:
+            if m == "__STAGE_2__":
+                S["pipeline_stage"] = 2
+            elif m == "__STAGE_DONE__":
+                S["pipeline_stage"] = 99
 
         if done:
             S["pipeline_running"] = False

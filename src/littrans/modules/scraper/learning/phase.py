@@ -209,7 +209,7 @@ async def _fetch_chapters(
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"  [{tag}] ⚠ Fetch Ch.{i+1} thất bại: {e}", flush=True)
+            print(f"  [{tag}] ⚠ Fetch Ch.{i+1} thất bại: {type(e).__name__}: {e}", flush=True)
             break
 
         if is_junk_page(html, status):

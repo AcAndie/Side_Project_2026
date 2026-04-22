@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from littrans.config.settings import settings
 from littrans.utils.io_utils import load_text, atomic_write
+from littrans.utils.bench import measure
 from littrans.core.text_normalizer import normalize as normalize_text
 from littrans.core.post_processor  import run as pp_run, report as pp_report
 from littrans.context.glossary   import filter_glossary, add_new_terms, has_pending_terms, count_pending_terms
@@ -215,9 +216,10 @@ class Pipeline:
 
         print(f"\n▶  [{chapter_index+1}] Dịch: {filename}")
 
-        return self._translate_three_call(
-            filename, text, out_filepath, chapter_index, skip_data_update
-        )
+        with measure("translate_chapter", ch=chapter_index + 1, file=filename):
+            return self._translate_three_call(
+                filename, text, out_filepath, chapter_index, skip_data_update
+            )
 
     # ── 3-call flow ───────────────────────────────────────────────
 
@@ -240,8 +242,9 @@ class Pipeline:
             ctx_notes     = ""
             print(f"     [Bible mode] Name Lock: {len(name_lock)} · Skills: {len(known_skills)}")
         else:
-            glossary_ctx  = filter_glossary(text)
-            char_profiles = filter_characters(text)
+            with measure("ctx_filter", ch=chapter_index):
+                glossary_ctx  = filter_glossary(text)
+                char_profiles = filter_characters(text)
             arc_mem       = load_arc_memory()
             ctx_notes     = load_context_notes()
             total_terms   = sum(len(v) for v in glossary_ctx.values())

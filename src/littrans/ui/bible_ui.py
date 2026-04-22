@@ -240,18 +240,9 @@ def _launch_bible_scan(log_queue: queue.Queue, depth: str,
 
 def _handle_scan_log(S: Any) -> None:
     import streamlit as st
+    from littrans.ui.runner import poll_queue
     if S.bible_scan_running:
-        q: queue.Queue = S.bible_scan_q
-        done = False
-        while True:
-            try:
-                msg = q.get_nowait()
-                if msg == "__DONE__":
-                    done = True
-                else:
-                    S.bible_scan_logs.append(msg)
-            except queue.Empty:
-                break
+        done, _ = poll_queue(S.bible_scan_q, S.bible_scan_logs)
         if done:
             S.bible_scan_running = False
             S.bible_scan_logs.append("─" * 56)
@@ -603,18 +594,9 @@ def _launch_crossref(log_queue: queue.Queue) -> None:
 
 def _handle_crossref_log(S: Any) -> None:
     import streamlit as st
+    from littrans.ui.runner import poll_queue
     if S.bible_crossref_running:
-        q: queue.Queue = S.bible_crossref_q
-        done = False
-        while True:
-            try:
-                msg = q.get_nowait()
-                if msg == "__DONE__":
-                    done = True
-                else:
-                    S.bible_crossref_logs.append(msg)
-            except queue.Empty:
-                break
+        done, _ = poll_queue(S.bible_crossref_q, S.bible_crossref_logs)
         if done:
             S.bible_crossref_running = False
             S.bible_crossref_logs.append("✅ Cross-reference hoàn tất.")

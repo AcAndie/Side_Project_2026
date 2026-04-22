@@ -14,6 +14,39 @@ import queue
 import traceback
 from pathlib import Path
 
+# ── Queue polling helper ──────────────────────────────────────────
+
+DONE_SENTINEL = "__DONE__"
+
+
+def poll_queue(
+    q: queue.Queue,
+    logs: list,
+    *,
+    extra_markers: tuple[str, ...] = (),
+    max_drain: int = 300,
+) -> tuple[bool, list[str]]:
+    """Drain queue into logs list without blocking.
+
+    Returns (done, extra_markers_seen). Replaces 5 duplicate drain loops.
+    Messages matching extra_markers are collected separately (not appended to logs).
+    """
+    done = False
+    extras: list[str] = []
+    for _ in range(max_drain):
+        try:
+            msg = q.get_nowait()
+        except queue.Empty:
+            break
+        if msg == DONE_SENTINEL:
+            done = True
+            break
+        elif msg in extra_markers:
+            extras.append(msg)
+        else:
+            logs.append(msg)
+    return done, extras
+
 
 class _StdoutCapture(io.TextIOBase):
     """Redirect stdout → Queue."""

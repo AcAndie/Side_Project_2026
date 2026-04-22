@@ -172,24 +172,21 @@ def _launch(log_queue: queue.Queue, output_mode: str = "per_chapter") -> None:
         finally:
             sys.stdout = old
 
-    threading.Thread(target=_worker, daemon=True).start()
+    th = threading.Thread(target=_worker, daemon=True)
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx
+        add_script_run_ctx(th)
+    except ImportError:
+        pass
+    th.start()
 
 
 def _handle_log(S: Any) -> None:
     import streamlit as st
+    from littrans.ui.runner import poll_queue
 
     if S.epub_running:
-        q    = S.epub_q
-        done = False
-        while True:
-            try:
-                msg = q.get_nowait()
-                if msg == "__DONE__":
-                    done = True
-                else:
-                    S.epub_logs.append(msg)
-            except queue.Empty:
-                break
+        done, _ = poll_queue(S.epub_q, S.epub_logs)
         if done:
             S.epub_running = False
             S.epub_logs.append("─" * 56)

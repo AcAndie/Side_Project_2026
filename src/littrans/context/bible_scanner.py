@@ -17,29 +17,13 @@ import math
 import re
 import time
 import logging
-from datetime import datetime
 from pathlib import Path
 
 from littrans.context.bible_store import BibleStore
-from littrans.context.schemas import (
-    ScanOutput, ScanCandidate, ScanWorldBuildingClue,
-    ScanLoreEntry,
-)
+from littrans.context.schemas import ScanOutput
+from littrans.context.bible_response_parser import _parse_scan_response, _merge_scan_outputs
 from littrans.utils.io_utils import load_text
-
-
-def _normalize_list_of_dicts(items: list, string_key: str = "title") -> list[dict]:
-    """
-    Model đôi khi trả về list of strings thay vì list of dicts.
-    "Arrival in Elysium" → {"title": "Arrival in Elysium"}
-    """
-    result = []
-    for item in items:
-        if isinstance(item, dict):
-            result.append(item)
-        elif isinstance(item, str) and item.strip():
-            result.append({string_key: item.strip()})
-    return result
+from littrans.utils.retry_utils import with_retry, Backoff, is_network
 
 
 
@@ -49,8 +33,7 @@ def _normalize_list_of_dicts(items: list, string_key: str = "title") -> list[dic
 CHUNK_SIZE = 15_000
 
 # Retry config cho network errors
-_SCAN_MAX_RETRIES  = 3
-_SCAN_RETRY_DELAYS = [15, 30, 60]   # giây chờ giữa các lần thử
+_SCAN_MAX_RETRIES = 3
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -68,20 +51,17 @@ def _normalize(text: str) -> str:
         return text.replace("\r\n", "\n").strip()
 
 
+@with_retry(
+    max_attempts=_SCAN_MAX_RETRIES,
+    retry_on=is_network,
+    backoff=Backoff(base=15.0, cap=60.0, factor=2.0, jitter=0.0),
+    on_retry=lambda a, e, w: print(
+        f"      🔄 Retry {a+1}/{_SCAN_MAX_RETRIES} — chờ {w:.0f}s: {str(e)[:80]}"
+    ),
+)
 def _call_json(system: str, user: str) -> dict:
     from littrans.llm.client import call_gemini_json
     return call_gemini_json(system, user)
-
-
-def _is_network_error(exc: Exception) -> bool:
-    """True nếu lỗi là do mạng/timeout — nên retry."""
-    msg = str(exc).lower()
-    return any(k in msg for k in (
-        "10060", "10061", "connection", "timeout", "timed out",
-        "winerror", "connecttimeout", "readtimeout", "connection reset",
-        "remote end closed", "connection aborted", "connection refused",
-        "network", "socket", "ssl",
-    ))
 
 
 # ── Chunk splitter ────────────────────────────────────────────────
@@ -233,212 +213,6 @@ def _build_user_message(
     return "\n\n---\n\n".join(parts)
 
 
-# ── Response Parser ───────────────────────────────────────────────
-
-def _parse_scan_response(
-    raw_data,
-    source_chapter: str,
-    chapter_index: int,
-    depth: str,
-    model_used: str,
-) -> ScanOutput:
-    # [FIX v1] Guard khi AI trả về JSON array hoặc kiểu khác thay vì dict
-    if isinstance(raw_data, list):
-        # Model trả về array entities trực tiếp thay vì {"database_candidates": [...]}
-        # → wrap lại đúng format
-        logging.warning(
-            f"[BibleScanner] raw_data là list (size={len(raw_data)}) "
-            f"cho '{source_chapter}' — wrap thành database_candidates"
-        )
-        raw_data = {"database_candidates": raw_data}
-    elif not isinstance(raw_data, dict):
-        logging.warning(
-            f"[BibleScanner] raw_data là {type(raw_data).__name__} "
-            f"(không phải dict) cho '{source_chapter}' — bỏ qua"
-        )
-        raw_data = {}
-
-    candidates = []
-    for c in raw_data.get("database_candidates", []):
-        if not isinstance(c, dict):
-            continue
-        # Normalize field names — model đôi khi dùng "type" thay vì "entity_type",
-        # "full_name" thay vì "en_name", "name" thay vì "en_name"
-        if "entity_type" not in c and "type" in c:
-            c = dict(c)
-            c["entity_type"] = c.pop("type")
-        if "en_name" not in c:
-            c = dict(c)
-            c["en_name"] = (c.get("full_name") or c.get("name") or "").strip()
-        en = c.get("en_name", "").strip()
-        if not en:
-            continue
-        try:
-            conf = float(c.get("confidence", 0.9))
-        except Exception:
-            conf = 0.9
-        candidates.append(ScanCandidate(
-            entity_type=c.get("entity_type", "concept"),
-            en_name=en,
-            canonical_name=c.get("canonical_name", "").strip(),
-            existing_id=c.get("existing_id", "").strip(),
-            is_new=bool(c.get("is_new", True)),
-            description=c.get("description", "").strip(),
-            raw_data=c.get("raw_data", {}),
-            confidence=min(1.0, max(0.0, conf)),
-            context_snippet=c.get("context_snippet", "").strip()[:200],
-        ))
-
-    clues = []
-    for w in raw_data.get("worldbuilding_clues", []):
-        if not isinstance(w, dict):
-            continue
-        try:
-            conf = float(w.get("confidence", 0.8))
-        except Exception:
-            conf = 0.8
-        clues.append(ScanWorldBuildingClue(
-            category=w.get("category", "other"),
-            description=w.get("description", "").strip(),
-            raw_text=w.get("raw_text", "").strip()[:300],
-            confidence=min(1.0, max(0.0, conf)),
-        ))
-
-    lr = raw_data.get("lore_entry", {})
-    if not isinstance(lr, dict):
-        lr = {}
-    lore = ScanLoreEntry(
-        chapter_summary=lr.get("chapter_summary", "").strip(),
-        tone=lr.get("tone", "").strip(),
-        pov_char=lr.get("pov_char", "").strip(),
-        location=lr.get("location", "").strip(),
-        key_events=_normalize_list_of_dicts(
-            lr.get("key_events", []) if isinstance(lr.get("key_events"), list) else [],
-            string_key="title"),
-        plot_threads_opened=_normalize_list_of_dicts(
-            lr.get("plot_threads_opened", []) if isinstance(lr.get("plot_threads_opened"), list) else [],
-            string_key="name"),
-        plot_threads_closed=_normalize_list_of_dicts(
-            lr.get("plot_threads_closed", []) if isinstance(lr.get("plot_threads_closed"), list) else [],
-            string_key="thread_name"),
-        revelations=_normalize_list_of_dicts(
-            lr.get("revelations", []) if isinstance(lr.get("revelations"), list) else [],
-            string_key="title"),
-        relationship_changes=_normalize_list_of_dicts(
-            lr.get("relationship_changes", []) if isinstance(lr.get("relationship_changes"), list) else [],
-            string_key="event"),
-    )
-    return ScanOutput(
-        source_chapter=source_chapter,
-        chapter_index=chapter_index,
-        scan_depth=depth,
-        database_candidates=candidates,
-        worldbuilding_clues=clues,
-        lore_entry=lore,
-        scanned_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
-        model_used=model_used,
-        raw_response=raw_data,
-    )
-
-
-# ── Chunk merger ──────────────────────────────────────────────────
-
-def _merge_scan_outputs(outputs: list[ScanOutput], source_chapter: str, chapter_index: int, depth: str, model_used: str) -> ScanOutput:
-    """
-    Gộp nhiều ScanOutput từ các chunk thành 1 ScanOutput hoàn chỉnh.
-
-    Candidates: dedup theo en_name (giữ bản confidence cao hơn).
-    Clues: dedup theo description.
-    Lore: lấy chunk đầu tiên có chapter_summary; merge key_events, plot_threads, revelations.
-    """
-    if len(outputs) == 1:
-        return outputs[0]
-
-    # ── Merge candidates (dedup theo en_name, giữ confidence cao nhất) ──
-    seen_entities: dict[str, ScanCandidate] = {}
-    for out in outputs:
-        for c in out.database_candidates:
-            key = c.en_name.lower().strip()
-            if key not in seen_entities or c.confidence > seen_entities[key].confidence:
-                seen_entities[key] = c
-    merged_candidates = list(seen_entities.values())
-
-    # ── Merge worldbuilding clues (dedup theo description) ──────────────
-    seen_clues: dict[str, ScanWorldBuildingClue] = {}
-    for out in outputs:
-        for w in out.worldbuilding_clues:
-            key = w.description.lower().strip()[:80]
-            if key and key not in seen_clues:
-                seen_clues[key] = w
-    merged_clues = list(seen_clues.values())
-
-    # ── Merge lore ───────────────────────────────────────────────────────
-    # chapter_summary: lấy cái đầu tiên có nội dung; nếu nhiều hơn 1 chunk
-    # có summary thì nối lại ngắn gọn
-    summaries = [o.lore_entry.chapter_summary for o in outputs if o.lore_entry.chapter_summary]
-    if len(summaries) > 1:
-        merged_summary = " | ".join(summaries)
-    elif summaries:
-        merged_summary = summaries[0]
-    else:
-        merged_summary = ""
-
-    # tone, pov_char, location: lấy từ chunk đầu tiên có giá trị
-    def _first(attr: str) -> str:
-        for o in outputs:
-            v = getattr(o.lore_entry, attr, "")
-            if v:
-                return v
-        return ""
-
-    # key_events, plot_threads, revelations, relationship_changes: gộp tất cả, dedup theo title/name
-    def _merge_list_by_key(items_list: list[list[dict]], key: str) -> list[dict]:
-        seen: set[str] = set()
-        result: list[dict] = []
-        for items in items_list:
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                k = str(item.get(key, "")).lower().strip()
-                if k and k not in seen:
-                    seen.add(k)
-                    result.append(item)
-        return result
-
-    merged_lore = ScanLoreEntry(
-        chapter_summary=merged_summary,
-        tone=_first("tone"),
-        pov_char=_first("pov_char"),
-        location=_first("location"),
-        key_events=_merge_list_by_key(
-            [o.lore_entry.key_events for o in outputs], "title"
-        ),
-        plot_threads_opened=_merge_list_by_key(
-            [o.lore_entry.plot_threads_opened for o in outputs], "name"
-        ),
-        plot_threads_closed=_merge_list_by_key(
-            [o.lore_entry.plot_threads_closed for o in outputs], "thread_name"
-        ),
-        revelations=_merge_list_by_key(
-            [o.lore_entry.revelations for o in outputs], "title"
-        ),
-        relationship_changes=_merge_list_by_key(
-            [o.lore_entry.relationship_changes for o in outputs], "event"
-        ),
-    )
-
-    return ScanOutput(
-        source_chapter=source_chapter,
-        chapter_index=chapter_index,
-        scan_depth=depth,
-        database_candidates=merged_candidates,
-        worldbuilding_clues=merged_clues,
-        lore_entry=merged_lore,
-        scanned_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
-        model_used=model_used,
-        raw_response={},
-    )
-
 
 # ── Single chunk scan (với retry) ────────────────────────────────
 
@@ -452,50 +226,15 @@ def _scan_chunk(
     chunk_label: str,
     model_used: str,
 ) -> ScanOutput | None:
-    """
-    Scan 1 chunk văn bản với retry cho network errors.
-    Trả về ScanOutput hoặc None nếu thất bại hoàn toàn.
-    """
-    last_error: Exception | None = None
-
-    for attempt in range(_SCAN_MAX_RETRIES):
-        if attempt > 0:
-            delay = _SCAN_RETRY_DELAYS[min(attempt - 1, len(_SCAN_RETRY_DELAYS) - 1)]
-            print(f"      🔄 Retry {attempt}/{_SCAN_MAX_RETRIES - 1} — chờ {delay}s...")
-            time.sleep(delay)
-
-        user_message = _build_user_message(
-            chunk_text, filename, known_entities, chunk_label,
-        )
-
-        try:
-            raw_data = _call_json(system_prompt, user_message)
-            output   = _parse_scan_response(
-                raw_data, filename, chapter_index, depth, model_used,
-            )
-            return output
-        except Exception as e:
-            last_error = e
-            if _is_network_error(e):
-                logging.warning(
-                    f"[BibleScanner] Network error '{filename}' {chunk_label} "
-                    f"attempt {attempt + 1}/{_SCAN_MAX_RETRIES}: {e}"
-                )
-                print(
-                    f"      ⚠️  Network error (attempt {attempt + 1}/{_SCAN_MAX_RETRIES}): "
-                    f"{str(e)[:100]}"
-                )
-                continue
-            else:
-                logging.error(f"[BibleScanner] {filename} {chunk_label}: {e}")
-                print(f"      ❌ Lỗi (không retry): {e}")
-                return None
-
-    logging.error(
-        f"[BibleScanner] '{filename}' {chunk_label} hết retry. Last: {last_error}"
-    )
-    print(f"      ❌ Thất bại sau {_SCAN_MAX_RETRIES} lần: {last_error}")
-    return None
+    """Scan 1 chunk văn bản. Network retry handled by @with_retry on _call_json."""
+    user_message = _build_user_message(chunk_text, filename, known_entities, chunk_label)
+    try:
+        raw_data = _call_json(system_prompt, user_message)
+        return _parse_scan_response(raw_data, filename, chapter_index, depth, model_used)
+    except Exception as e:
+        logging.error(f"[BibleScanner] {filename} {chunk_label}: {e}")
+        print(f"      ❌ Thất bại sau {_SCAN_MAX_RETRIES} lần: {e}")
+        return None
 
 
 # ── Bible Scanner ─────────────────────────────────────────────────

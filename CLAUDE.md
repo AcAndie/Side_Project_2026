@@ -3,20 +3,31 @@
 > Dự án: `C:\Users\FPT MONG CAI\Desktop\NovelPipeline\`
 > Stack: Python 3.11+, Streamlit, Gemini/Claude API, Playwright, ebooklib
 
----
+## Refactor Batch Plan (2026-04-22)
 
-## Phase checklist
+Kế hoạch: phát hiện 6 duplication hotspots + 5 perf bottlenecks → fix theo batch.
+Chi tiết đầy đủ: `.claude/plans/review-to-n-b-codebase-iterative-treasure.md`
 
 ```
-Phase 0 — Tách Repo & Chuẩn Bị         [x] DONE 2026-04-20
-Phase 1 — Unified Config & Multi-Key   [x] DONE 2026-04-20
-Phase 2 — Port Scraper Thành Module    [x] DONE 2026-04-20 — live test PASS (resume verified)
-Phase 3 — Audit & Enhance EPUB         [x] DONE 2026-04-20
-Phase 4 — UI: Scraper Page             [x] DONE 2026-04-20 — scraper_page.py, ScrapeRunner
-Phase 5 — UI: Pipeline Page            [x] DONE 2026-04-20 — pipeline_page.py, PipelineRunner
-Phase 6 — EPUB Export                  [x] DONE 2026-04-20 — epub_exporter.py, BytesIO download
-Phase 7 — Dashboard, CLI & Polish      [ ] not started
+Batch 1 — Benchmark baseline          [x] DONE 2026-04-22
+           bench.py + instrument pipeline.py + scraper.py
+Batch 2 — Unified retry decorator     [x] DONE 2026-04-22
+           retry_utils.py + epub_processor + bible_scanner + agents.py
+Batch 3 — UI polling dedup            [x] DONE 2026-04-22
+           poll_queue() → runner.py; replace 5 drain loops + fix epub add_script_run_ctx
+Batch 4 — Cache glossary/characters   [x] DONE 2026-04-22
+           glossary._load_all() cached by content-hash; chars cached by mtime_ns
+Batch 5 — Scraper HTML parse reuse    [x] DONE 2026-04-22
+           PipelineContext.get_soup() lazy cache; remove duplicate parse in find_start_chapter
+Batch 6 — I/O helpers + misc dedup   [x] DONE 2026-04-22
+           load_json_safe() → io_utils; parse_markdown public → glossary; ads_filter module-level cache
+Batch 7 — Split oversized files       [x] DONE 2026-04-22
+           app.py(1413→249) + pages/ package (7 pages); agents.py(955→~350) + agents_helpers.py;
+           bible_scanner.py(781→~430) + bible_response_parser.py;
+           loaders.py + env_utils.py + ui_utils.py extracted from app.py
 ```
+
+**Sau Batch 1:** chạy translate + scrape để lấy `data/bench.jsonl` baseline trước khi làm Batch 4.
 
 ---
 
@@ -33,6 +44,9 @@ NovelPipeline/
 │   ├── tools/
 │   │   ├── epub_processor.py    ← EPUB → inputs/{novel}/*.md
 │   │   └── epub_exporter.py     ← outputs/{novel}/*_VN.txt → .epub (BytesIO)
+│   ├── utils/
+│   │   ├── io_utils.py          ← load_text, atomic_write
+│   │   └── bench.py             ← measure()/timed() → data/bench.jsonl [B1]
 │   └── ui/
 │       ├── app.py               ← Streamlit entry point (v5.6)
 │       ├── pipeline_page.py     ← 1-click pipeline: scrape/epub → translate

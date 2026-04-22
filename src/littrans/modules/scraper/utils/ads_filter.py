@@ -19,6 +19,30 @@ _MAX_LINE_LEN = 300
 # FIX-ADSSAVE: module-level threading lock cho save().
 _ADS_SAVE_LOCK = threading.Lock()
 
+# Module-level cache: ADS_DB_FILE chỉ đọc từ disk 1 lần per process.
+# Invalidated sau mỗi save() để load() tiếp theo thấy changes mới.
+_ADS_DB_CACHE: "dict | None" = None
+
+
+def _load_ads_db() -> dict:
+    global _ADS_DB_CACHE
+    if _ADS_DB_CACHE is not None:
+        return _ADS_DB_CACHE
+    with _ADS_SAVE_LOCK:
+        if _ADS_DB_CACHE is not None:
+            return _ADS_DB_CACHE
+        data: dict = {}
+        if os.path.exists(ADS_DB_FILE):
+            try:
+                with open(ADS_DB_FILE, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data = loaded
+            except Exception as e:
+                logger.warning("[Ads] load failed: %s", e)
+        _ADS_DB_CACHE = data
+        return data
+
 class AdsFilter:
 
     def __init__(self, domain: str, known_keywords: set[str]) -> None:
@@ -36,19 +60,9 @@ class AdsFilter:
 
     @classmethod
     def load(cls, domain: str) -> "AdsFilter":
-        global_kws: set[str] = set()
-        domain_kws: set[str] = set()
-
-        if os.path.exists(ADS_DB_FILE):
-            try:
-                with open(ADS_DB_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    global_kws = set(data.get("global", []))
-                    domain_kws = set(data.get(domain, []))
-            except Exception as e:
-                logger.warning("[Ads] load failed: %s", e)
-
+        data = _load_ads_db()
+        global_kws = set(data.get("global", []))
+        domain_kws = set(data.get(domain, []))
         return cls(domain=domain, known_keywords=global_kws | domain_kws)
 
     def inject_from_profile(self, profile: dict) -> int:
@@ -206,6 +220,8 @@ class AdsFilter:
                 with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
                 os.replace(tmp, ADS_DB_FILE)
+                global _ADS_DB_CACHE
+                _ADS_DB_CACHE = None  # invalidate so next load() re-reads
 
         except Exception as e:
             logger.warning("[Ads] save failed: %s", e)

@@ -49,6 +49,50 @@ from littrans.context.char_history import (
 _lock  = threading.Lock()
 _mlock = threading.Lock()
 
+# Per-file load caches — invalidated when file size or mtime_ns changes.
+# Archive hit rate is high (only rotated occasionally).
+# Active hit rate is low (touch_seen writes after every chapter), but archive
+# saves are real gains for novels with many archived characters.
+_char_active_cache:  "tuple[str, dict] | None" = None
+_char_archive_cache: "tuple[str, dict] | None" = None
+_char_cache_lock     = threading.Lock()
+
+
+def _file_key(*paths) -> str:
+    """Return a string that changes whenever any path is written to."""
+    parts: list[str] = []
+    for p in paths:
+        try:
+            s = p.stat()
+            parts.append(f"{s.st_size}:{s.st_mtime_ns}")
+        except OSError:
+            parts.append("missing")
+    return "|".join(parts)
+
+
+def _cached_load_active() -> dict:
+    """load_active(include_staging=True) with mtime-keyed cache."""
+    global _char_active_cache
+    key = _file_key(settings.characters_active_file, settings.staging_chars_file)
+    with _char_cache_lock:
+        if _char_active_cache is not None and _char_active_cache[0] == key:
+            return _char_active_cache[1]
+        data = load_active(include_staging=True)
+        _char_active_cache = (key, data)
+        return data
+
+
+def _cached_load_archive() -> dict:
+    """load_archive() with mtime-keyed cache."""
+    global _char_archive_cache
+    key = _file_key(settings.characters_archive_file)
+    with _char_cache_lock:
+        if _char_archive_cache is not None and _char_archive_cache[0] == key:
+            return _char_archive_cache[1]
+        data = load_archive()
+        _char_archive_cache = (key, data)
+        return data
+
 _EMOTION_DISPLAY = {
     "angry"  : ("TỨC GIẬN",    "Lời thoại có thể gay gắt, cộc cằn, mất kiểm soát"),
     "hurt"   : ("TỔN THƯƠNG",  "Lời thoại có thể trầm, đau đớn, co rút"),
@@ -94,8 +138,8 @@ def load_archive() -> dict:
 
 def filter_characters(chapter_text: str) -> dict[str, str]:
     """Trả về {name: formatted_profile} cho nhân vật XUẤT HIỆN trong chương."""
-    active  = load_active(include_staging=True)
-    archive = load_archive()
+    active  = _cached_load_active()
+    archive = _cached_load_archive()
     mc_name = active.get("meta", {}).get("main_character", "")
     matched: dict[str, str] = {}
 
@@ -273,7 +317,7 @@ def _fmt_rel(other: str, r: dict) -> list[str]:
 # ── EPS format for prompt_builder ────────────────────────────────
 
 def format_eps_summary(char_profiles: dict[str, str], chapter_text: str) -> str:
-    active  = load_active(include_staging=True)
+    active  = _cached_load_active()
     chars   = active.get("characters", {})
 
     eps_lines = []

@@ -72,6 +72,7 @@ from littrans.modules.scraper.ai.client            import AIRateLimiter
 from littrans.modules.scraper.ai.agents            import ai_classify_and_find, ai_find_first_chapter
 
 from littrans.modules.scraper.pipeline.executor    import run_chapter as pipeline_run_chapter
+from littrans.utils.bench import measure
 
 logger = logging.getLogger(__name__)
 
@@ -175,9 +176,7 @@ async def find_start_chapter(
         r"|/(?:episode|ep|part)[_\-]?\d+",
         re.IGNORECASE,
     )
-    from bs4 import BeautifulSoup as _BS
-    _hsoup = _BS(html, "html.parser")
-    for a in _hsoup.find_all("a", href=True):
+    for a in soup.find_all("a", href=True):
         href = a["href"]
         if _CHAPTER_HREF_RE.search(href):
             from urllib.parse import urljoin
@@ -221,25 +220,26 @@ async def scrape_one_chapter(
             ai_limiter, issue_reporter=issue_reporter,
         )
 
-    try:
-        ctx = await pipeline_run_chapter(
-            url             = url,
-            profile         = dict(profile),
-            progress        = dict(progress),
-            pool            = pool,
-            pw_pool         = pw_pool,
-            ai_limiter      = ai_limiter,
-            prefetched_html = prefetched_html,
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        err_msg = str(e) or repr(e)
-        ch_num  = progress.get("chapter_count", 0) + 1
-        if any(kw in err_msg.lower() for kw in ("403", "captcha", "cloudflare", "blocked")):
-            issue_reporter.report("BLOCKED", url, detail=err_msg[:120], chapter_num=ch_num)
-        # P1-E: wrap với URL context để caller biết chapter nào lỗi
-        raise RuntimeError(f"[{url}] {type(e).__name__}: {err_msg}") from e
+    with measure("scrape_chapter", url=url):
+        try:
+            ctx = await pipeline_run_chapter(
+                url             = url,
+                profile         = dict(profile),
+                progress        = dict(progress),
+                pool            = pool,
+                pw_pool         = pw_pool,
+                ai_limiter      = ai_limiter,
+                prefetched_html = prefetched_html,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            err_msg = str(e) or repr(e)
+            ch_num  = progress.get("chapter_count", 0) + 1
+            if any(kw in err_msg.lower() for kw in ("403", "captcha", "cloudflare", "blocked")):
+                issue_reporter.report("BLOCKED", url, detail=err_msg[:120], chapter_num=ch_num)
+            # P1-E: wrap với URL context để caller biết chapter nào lỗi
+            raise RuntimeError(f"[{url}] {type(e).__name__}: {err_msg}") from e
 
     html    = ctx.html
     content = ctx.content

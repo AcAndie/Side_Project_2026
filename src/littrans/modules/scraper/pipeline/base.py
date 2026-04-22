@@ -153,6 +153,17 @@ class PipelineContext:
     total_duration_ms: float = 0.0
     errors:            list  = field(default_factory=list)
 
+    def get_soup(self):
+        """Lazy-parse html into soup. Returns cached soup if already set."""
+        if self.soup is None and self.html:
+            from bs4 import BeautifulSoup
+            self.soup = BeautifulSoup(self.html, "html.parser")
+        return self.soup
+
+    def invalidate_soup(self) -> None:
+        """Call when html field is mutated after soup was already parsed."""
+        self.soup = None
+
     def record(self, block_name: str, result: BlockResult) -> None:
         self.block_results[block_name] = result
         self.total_duration_ms += result.duration_ms

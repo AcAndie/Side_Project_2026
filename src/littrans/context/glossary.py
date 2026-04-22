@@ -35,10 +35,14 @@ _aho_lock     = threading.Lock()
 _AHO_CACHE_MAX = 5
 _NEW_SECTION  = "Mới — chờ phân loại"
 
+# Cache for _load_all() — invalidated by content hash (size+mtime_ns per file).
+# Hit rate is high because glossary files only change when Scout adds new terms.
+_all_data_cache: "tuple[str, dict] | None" = None
+
 
 # ── Parse ────────────────────────────────────────────────────────
 
-def _parse(text: str) -> dict[str, str]:
+def parse_markdown(text: str) -> dict[str, str]:
     """text → {term_lower: original_line}"""
     terms: dict[str, str] = {}
     for line in text.splitlines():
@@ -51,10 +55,17 @@ def _parse(text: str) -> dict[str, str]:
 
 
 def _load_all() -> dict[str, dict[str, str]]:
+    global _all_data_cache
+    h = _get_content_hash()
+    with _aho_lock:
+        if _all_data_cache is not None and _all_data_cache[0] == h:
+            return _all_data_cache[1]
     result: dict[str, dict[str, str]] = {}
     for cat, path in settings.glossary_files.items():
-        result[cat] = _parse(load_text(path))
-    result["staging"] = _parse(load_text(settings.staging_terms_file))
+        result[cat] = parse_markdown(load_text(path))
+    result["staging"] = parse_markdown(load_text(settings.staging_terms_file))
+    with _aho_lock:
+        _all_data_cache = (h, result)
     return result
 
 

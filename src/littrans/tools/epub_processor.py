@@ -37,6 +37,8 @@ from typing import Literal
 
 from tqdm import tqdm
 
+from littrans.utils.retry_utils import with_retry, Backoff, is_retriable
+
 
 # ═══════════════════════════════════════════════════════════════════
 # DEPENDENCY HELPERS
@@ -69,87 +71,69 @@ _DELAY_MIN      = 3
 _DELAY_MAX      = 8
 
 
-def _parse_retry_delay(error: Exception, default: float = 30.0) -> float:
-    for pattern in [r'retry_delay\s*\{\s*seconds:\s*(\d+)', r'retry in\s*([\d.]+)s']:
-        m = re.search(pattern, str(error))
-        if m:
-            return float(m.group(1)) + 2
-    return default
-
-
+@with_retry(
+    max_attempts=6,
+    retry_on=is_retriable,
+    backoff=Backoff(base=30.0, cap=120.0, factor=2.0, jitter=0.1),
+    on_retry=lambda a, e, w: tqdm.write(f"\n    [~] Retry {a+1}/6 — chờ {w:.0f}s: {str(e)[:80]}"),
+)
 def _epub_call_text(system: str, user: str) -> str:
     """Gọi Gemini → plain text. Dùng cho clean agent."""
     from google.genai import types
-    # [FIX] Bỏ _call_with_timeout — timeout được xử lý bởi http_options trong genai.Client
-    from littrans.llm.client import key_pool, is_rate_limit, handle_api_error
+    from littrans.llm.client import key_pool, handle_api_error
     settings = _get_settings()
-
-    while True:
-        def _do():
-            return key_pool.current_client.models.generate_content(
-                model=settings.gemini_model,
-                contents=user,
-                config=types.GenerateContentConfig(
-                    system_instruction=system,
-                    temperature=0.1,
-                ),
-            )
-        try:
-            resp = _do()  # [FIX] trực tiếp thay vì _call_with_timeout(_do, API_TIMEOUT)
-            if not resp.parts:
-                tqdm.write("    [!] AI trả về rỗng — giữ nguyên text.")
-                return user
-            key_pool.on_success()
-            return resp.text or ""
-        except Exception as e:
-            if is_rate_limit(e):
-                wait = _parse_retry_delay(e)
-                tqdm.write(f"\n    [~] Rate limit. Chờ {wait:.0f}s...")
-                time.sleep(wait)
-                handle_api_error(e)
-                continue
-            handle_api_error(e)
-            raise
+    used_key = key_pool.current_key
+    try:
+        resp = key_pool.current_client.models.generate_content(
+            model=settings.gemini_model,
+            contents=user,
+            config=types.GenerateContentConfig(
+                system_instruction=system,
+                temperature=0.1,
+            ),
+        )
+        if not resp.parts:
+            tqdm.write("    [!] AI trả về rỗng — giữ nguyên text.")
+            return user
+        key_pool.on_success()
+        return resp.text or ""
+    except Exception as e:
+        handle_api_error(e, failed_key=used_key)
+        raise
 
 
+@with_retry(
+    max_attempts=6,
+    retry_on=is_retriable,
+    backoff=Backoff(base=30.0, cap=120.0, factor=2.0, jitter=0.1),
+    on_retry=lambda a, e, w: tqdm.write(f"\n    [~] Retry {a+1}/6 — chờ {w:.0f}s: {str(e)[:80]}"),
+)
 def _epub_call_json(system: str, user: str) -> dict | list:
-    """
-    Gọi Gemini → JSON. Giữ nguyên list nếu structure analyst trả về list.
-    """
+    """Gọi Gemini → JSON. Giữ nguyên list nếu structure analyst trả về list."""
     from google.genai import types
-    # [FIX] Bỏ _call_with_timeout — timeout được xử lý bởi http_options trong genai.Client
-    from littrans.llm.client import key_pool, is_rate_limit, handle_api_error
+    from littrans.llm.client import key_pool, handle_api_error
     settings = _get_settings()
-
-    while True:
-        def _do():
-            return key_pool.current_client.models.generate_content(
-                model=settings.gemini_model,
-                contents=user,
-                config=types.GenerateContentConfig(
-                    system_instruction=system,
-                    temperature=0.0,
-                    response_mime_type="application/json",
-                ),
-            )
-        try:
-            resp = _do()  # [FIX] trực tiếp thay vì _call_with_timeout(_do, API_TIMEOUT)
-            key_pool.on_success()
-            raw   = resp.text or "{}"
-            clean = re.sub(r"^```json\s*|```\s*$", "", raw.strip(), flags=re.MULTILINE)
-            return json.loads(clean)
-        except json.JSONDecodeError as e:
-            logging.error(f"[EpubProcessor] JSON parse lỗi: {e}")
-            return {}
-        except Exception as e:
-            if is_rate_limit(e):
-                wait = _parse_retry_delay(e)
-                tqdm.write(f"\n    [~] Rate limit. Chờ {wait:.0f}s...")
-                time.sleep(wait)
-                handle_api_error(e)
-                continue
-            handle_api_error(e)
-            raise
+    used_key = key_pool.current_key
+    try:
+        resp = key_pool.current_client.models.generate_content(
+            model=settings.gemini_model,
+            contents=user,
+            config=types.GenerateContentConfig(
+                system_instruction=system,
+                temperature=0.0,
+                response_mime_type="application/json",
+            ),
+        )
+        key_pool.on_success()
+        raw   = resp.text or "{}"
+        clean = re.sub(r"^```json\s*|```\s*$", "", raw.strip(), flags=re.MULTILINE)
+        return json.loads(clean)
+    except json.JSONDecodeError as e:
+        logging.error(f"[EpubProcessor] JSON parse lỗi: {e}")
+        return {}
+    except Exception as e:
+        handle_api_error(e, failed_key=used_key)
+        raise
 
 
 # ═══════════════════════════════════════════════════════════════════

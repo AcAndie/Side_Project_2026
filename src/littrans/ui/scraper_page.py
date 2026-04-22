@@ -137,20 +137,10 @@ def render_scraper(S: Any) -> None:
 
 def _handle_log(S: Any) -> None:
     import streamlit as st
+    from littrans.ui.runner import poll_queue
 
     if S.scraper_running:
-        q    = S.scraper_q
-        done = False
-        while True:
-            try:
-                msg = q.get_nowait()
-                if msg == "__DONE__":
-                    done = True
-                else:
-                    S.scraper_logs.append(msg)
-            except queue.Empty:
-                break
-
+        done, _ = poll_queue(S.scraper_q, S.scraper_logs)
         if done:
             S["scraper_running"] = False
             result_holder = S.get("_scraper_result_holder", [])
