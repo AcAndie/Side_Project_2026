@@ -255,3 +255,247 @@ def render_settings() -> None:
 
     if reset_clicked:
         st.rerun()
+
+    # ── Phase 3: Admin expanders (merged from old top-level pages) ──
+    st.divider()
+    st.markdown("## 🛠 Quản lý dữ liệu truyện")
+
+    with st.expander("📊 Thống kê tổng quan", expanded=False):
+        _render_stats_inline(S)
+
+    with st.expander("👤 Quản lý nhân vật", expanded=False):
+        _render_characters_inline(S)
+
+    with st.expander("📚 Quản lý từ điển", expanded=False):
+        _render_glossary_inline(S)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Inline admin renderers (Phase 3)
+# ═══════════════════════════════════════════════════════════════════
+
+def _render_stats_inline(S) -> None:
+    from littrans.ui.loaders import load_chapters, load_stats as _load_stats
+
+    s        = _load_stats(S.current_novel)
+    chapters = load_chapters(S.current_novel)
+    done  = sum(1 for c in chapters if c["done"])
+    total = len(chapters)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric(
+        "Chương đã dịch", f"{done} / {total}",
+        delta=f"{int(done/total*100)}%" if total else None,
+    )
+    m2.metric("Nhân vật theo dõi", s["chars"].get("active", 0))
+    m3.metric("Nhân vật lưu trữ", s["chars"].get("archive", 0))
+    em = s["chars"].get("emotional", 0)
+    m4.metric(
+        "Trạng thái đặc biệt", em,
+        delta="cần chú ý" if em else None, delta_color="inverse",
+    )
+
+    glos          = s.get("glos", {})
+    total_terms   = sum(v for k, v in glos.items() if k != "staging")
+    staging_terms = glos.get("staging", 0)
+    m5, m6, m7, m8 = st.columns(4)
+    m5.metric("Thuật ngữ từ điển", total_terms)
+    m6.metric("Chờ phân loại", staging_terms,
+              delta="→ Quản lý từ điển" if staging_terms else None,
+              delta_color="inverse")
+    m7.metric("Kỹ năng đã biết", s["skills"].get("total", 0))
+    m8.metric("Tên đã chốt", s["lock"].get("total_locked", 0))
+
+
+def _render_characters_inline(S) -> None:
+    from littrans.ui.loaders import load_characters
+    from littrans.context.characters import has_staging_chars, delete_character
+
+    chars_data = load_characters(S.current_novel)
+    active  = chars_data["active"]
+    archive = chars_data["archive"]
+    staging_n = 0
+    try:
+        staging_n = has_staging_chars()
+    except Exception:
+        pass
+
+    head_l, head_r = st.columns([4, 1])
+    head_l.markdown(
+        f"**Active**: {len(active)} · **Archive**: {len(archive)} · "
+        f"**Staging chờ merge**: {staging_n}"
+    )
+    if head_r.button("↺ Refresh", key="settings_chars_refresh"):
+        load_characters.clear()
+        st.rerun()
+
+    if staging_n:
+        st.info(f"📥 {staging_n} nhân vật mới trong Staging.")
+        if st.button("📥 Merge Staging → Active", key="settings_chars_merge"):
+            from littrans.context.characters import sync_staging_to_active
+            n, _ = sync_staging_to_active()
+            load_characters.clear()
+            st.success(f"✅ Đã merge {n} nhân vật.")
+            st.rerun()
+
+    if not active and not archive:
+        st.caption("(chưa có nhân vật nào — tự động sinh khi dịch)")
+        return
+
+    tab_a, tab_b = st.tabs([
+        f"Active ({len(active)})",
+        f"Archive ({len(archive)})",
+    ])
+
+    for tab, src, label in [(tab_a, active, "active"), (tab_b, archive, "archive")]:
+        with tab:
+            search = st.text_input(
+                "🔍", placeholder="Tìm tên...",
+                label_visibility="collapsed",
+                key=f"settings_chars_search_{label}",
+            )
+            shown = sorted([
+                n for n in src
+                if not search or search.lower() in n.lower()
+            ])
+            st.caption(f"{len(shown)} / {len(src)}")
+            for name in shown[:80]:
+                p = src[name]
+                role  = p.get("role", "?")
+                level = p.get("power", {}).get("current_level", "—")
+                pron  = p.get("speech", {}).get("pronoun_self", "—")
+
+                row = st.columns([4, 2, 2, 1])
+                row[0].markdown(f"**{name}**")
+                row[1].caption(f"{role} · {level}")
+                row[2].caption(f"Tự xưng: {pron}")
+
+                ck = f"_settings_chars_del_{label}_{name}"
+                if not S.get(ck):
+                    if row[3].button(
+                        "🗑",
+                        key=f"settings_chars_del_btn_{label}_{name}",
+                        help="Xóa nhân vật khỏi DB",
+                    ):
+                        S[ck] = True; st.rerun()
+                else:
+                    yes, no = row[3].columns(2)
+                    if yes.button(
+                        "✓", key=f"settings_chars_del_yes_{label}_{name}",
+                        type="primary",
+                    ):
+                        ok = delete_character(name)
+                        S[ck] = False
+                        load_characters.clear()
+                        if ok:
+                            st.toast(f"🗑 Đã xóa '{name}'")
+                        st.rerun()
+                    if no.button("✕", key=f"settings_chars_del_no_{label}_{name}"):
+                        S[ck] = False; st.rerun()
+            if len(shown) > 80:
+                st.caption(f"... và {len(shown) - 80} nữa")
+
+
+def _render_glossary_inline(S) -> None:
+    from littrans.ui.loaders import load_glossary_data
+    from littrans.context.glossary import remove_term
+
+    glos = load_glossary_data(S.current_novel)
+    if not glos:
+        st.caption("(từ điển trống — tự động sinh khi dịch)")
+        return
+
+    staging_n = len(glos.get("staging", []))
+    head_l, head_r = st.columns([4, 1])
+    total = sum(len(v) for k, v in glos.items() if k != "staging")
+    head_l.markdown(
+        f"**Đã phân loại**: {total} thuật ngữ · **Staging**: {staging_n}"
+    )
+    if head_r.button("↺ Refresh", key="settings_glos_refresh"):
+        load_glossary_data.clear()
+        st.rerun()
+
+    cg_alive = S.cg_running and S.cg_thread is not None and \
+               getattr(S.cg_thread, "is_alive", lambda: False)()
+
+    if staging_n:
+        st.info(f"📖 {staging_n} thuật ngữ chờ phân loại.")
+        if not cg_alive:
+            if st.button("🔄 AI phân loại Staging", key="settings_glos_clean"):
+                import queue, time as _t
+                from littrans.ui.core.state import reset_job
+                from littrans.ui.runner import run_background
+                reset_job(S, "cg")
+                S.cg_logs = []
+                S.cg_q    = queue.Queue()
+                S.cg_thread = run_background(
+                    S.cg_q, mode="clean_glossary", novel_name=S.current_novel,
+                )
+                S.cg_running  = True
+                S.cg_last_log = _t.time()
+                st.rerun()
+        else:
+            st.caption("⏳ Đang phân loại…")
+
+    if S.cg_logs:
+        with st.expander("📋 Log phân loại", expanded=bool(S.cg_running)):
+            st.code("\n".join(S.cg_logs[-200:]), language=None)
+        if (not S.cg_running) and not S.get("_settings_cg_clear_done"):
+            load_glossary_data.clear()
+            S["_settings_cg_clear_done"] = True
+        if S.cg_running:
+            S["_settings_cg_clear_done"] = False
+
+    cat_label = {
+        "pathways": "Tu luyện", "organizations": "Tổ chức",
+        "items": "Vật phẩm", "locations": "Địa danh",
+        "general": "Chung", "staging": "⏳ Chờ phân loại",
+    }
+    sel_cat = st.selectbox(
+        "Danh mục", ["Tất cả"] + list(glos.keys()),
+        format_func=lambda c: cat_label.get(c, c),
+        key="settings_glos_cat",
+    )
+    search = st.text_input(
+        "🔍", placeholder="Tìm thuật ngữ...",
+        label_visibility="collapsed", key="settings_glos_search",
+    )
+
+    rows = []
+    for cat, entries in glos.items():
+        if sel_cat != "Tất cả" and cat != sel_cat:
+            continue
+        for eng, vn in entries:
+            sl = (search or "").lower()
+            if sl and sl not in eng.lower() and sl not in vn.lower():
+                continue
+            rows.append((cat, eng, vn))
+
+    st.caption(f"{len(rows)} thuật ngữ")
+    for cat, eng, vn in rows[:120]:
+        row = st.columns([3, 3, 1.5, 0.7])
+        row[0].write(eng)
+        row[1].write(vn)
+        row[2].caption(cat_label.get(cat, cat))
+        ck = f"_settings_glos_del_{eng}"
+        if not S.get(ck):
+            if row[3].button(
+                "🗑", key=f"settings_glos_del_btn_{eng}",
+                help="Xóa term khỏi tất cả file glossary",
+            ):
+                S[ck] = True; st.rerun()
+        else:
+            yes, no = row[3].columns(2)
+            if yes.button(
+                "✓", key=f"settings_glos_del_yes_{eng}", type="primary",
+            ):
+                n = remove_term(eng)
+                S[ck] = False
+                load_glossary_data.clear()
+                if n:
+                    st.toast(f"🗑 '{eng}' xóa khỏi {n} file.")
+                st.rerun()
+            if no.button("✕", key=f"settings_glos_del_no_{eng}"):
+                S[ck] = False; st.rerun()
+    if len(rows) > 120:
+        st.caption(f"... và {len(rows) - 120} nữa (lọc category để giảm số dòng)")

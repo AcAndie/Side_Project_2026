@@ -20,6 +20,15 @@ from littrans.modules.scraper.utils.string_helpers import is_cloudflare_challeng
 logger = logging.getLogger(__name__)
 
 
+_KNOWN_JS_HEAVY_DOMAINS = {
+    "royalroad.com", "www.royalroad.com",
+    "wattpad.com", "www.wattpad.com",
+    "webnovel.com", "www.webnovel.com",
+    "scribblehub.com", "www.scribblehub.com",
+    "wuxiaworld.com", "www.wuxiaworld.com",
+}
+
+
 async def fetch_page(
     url        : str,
     pool,
@@ -31,27 +40,40 @@ async def fetch_page(
     Fetch một URL. Trả về (status_code, html).
 
     Logic:
-        - requires_playwright=True hoặc domain flagged CF → Playwright thẳng
+        - requires_playwright=True, domain flagged CF, hoặc known JS-heavy → Playwright thẳng
         - Else: thử curl, nếu CF challenge → Playwright fallback
     """
     domain      = urlparse(url).netloc.lower()
     requires_pw = bool((profile or {}).get("requires_playwright", False))
+    is_known_js = domain in _KNOWN_JS_HEAVY_DOMAINS
 
-    if requires_pw or (pool and pool.is_cf_domain(domain)):
+    hard_limit = timeout * 2 + 10  # outer guard vs hang
+
+    async def _pw():
         return await pw_pool.fetch(url, timeout=timeout)
 
+    if requires_pw or is_known_js or (pool and pool.is_cf_domain(domain)):
+        if is_known_js and not requires_pw:
+            logger.info("[Fetch] %s known JS-heavy → Playwright direct", domain)
+        return await asyncio.wait_for(_pw(), timeout=hard_limit)
+
     try:
-        status, html = await pool.fetch(url, timeout=timeout)
+        status, html = await asyncio.wait_for(
+            pool.fetch(url, timeout=timeout), timeout=hard_limit,
+        )
 
         if is_cloudflare_challenge(html):
             logger.info("[Fetch] CF challenge on %s → Playwright", domain)
             pool.mark_cf_domain(domain)
-            return await pw_pool.fetch(url, timeout=timeout)
+            return await asyncio.wait_for(_pw(), timeout=hard_limit)
 
         return status, html
 
     except asyncio.CancelledError:
         raise
+    except asyncio.TimeoutError:
+        logger.warning("[Fetch] curl hard timeout %ds for %s — trying Playwright", hard_limit, url)
+        return await asyncio.wait_for(_pw(), timeout=hard_limit)
     except Exception as e:
         logger.warning("[Fetch] curl failed for %s: %s — trying Playwright", url, e)
-        return await pw_pool.fetch(url, timeout=timeout)
+        return await asyncio.wait_for(_pw(), timeout=hard_limit)

@@ -148,7 +148,8 @@ def _augment_with_bible_skills(skills: dict[str, dict], chapter_text: str) -> No
                 }
 
     except Exception as e:
-        logging.warning(f"[Skills] _augment_with_bible_skills lỗi: {e}")
+        logging.exception(f"[Skills] _augment_with_bible_skills lỗi: {e}")
+        print(f"  ⚠ [Bible augment skills] {e}", flush=True)
 
 def format_skills_for_prompt(skills: dict[str, dict]) -> str:
     if not skills:

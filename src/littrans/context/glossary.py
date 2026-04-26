@@ -219,6 +219,46 @@ def add_new_terms(new_terms: list, source_chapter: str) -> int:
     return total
 
 
+def remove_term(eng: str) -> int:
+    """
+    Xóa term (theo en_name, case-insensitive) khỏi mọi glossary file + staging.
+    Trả về số file đã sửa.
+    """
+    if not eng:
+        return 0
+    eng_lc = eng.strip().lower()
+    if not eng_lc:
+        return 0
+
+    paths = list(settings.glossary_files.values()) + [settings.staging_terms_file]
+    n_files = 0
+
+    with _lock:
+        for path in paths:
+            if not path.exists():
+                continue
+            text  = load_text(path)
+            kept  = []
+            removed = False
+            for line in text.splitlines():
+                clean = re.sub(r"^[\*\-\+]\s*", "", line.strip())
+                if ":" in clean and not clean.startswith("#"):
+                    head = clean.split(":", 1)[0].strip().lower()
+                    if head == eng_lc:
+                        removed = True
+                        continue
+                kept.append(line)
+            if removed:
+                atomic_write(path, "\n".join(kept) + ("\n" if text.endswith("\n") else ""))
+                n_files += 1
+
+        # Invalidate caches
+        global _all_data_cache
+        _all_data_cache = None
+
+    return n_files
+
+
 def _append_to_file(path, lines: list[str]) -> None:
     content = load_text(path)
     block   = "\n".join(lines)

@@ -86,7 +86,7 @@ async def run_learning_phase(
         ai_profile = {}
 
     # ── 3. Detect JS-heavy, tính requires_playwright ──────────────────────────
-    requires_pw = _detect_js_heavy(ai_profile, curl_html_ch1, chapters)
+    requires_pw = _detect_js_heavy(ai_profile, curl_html_ch1, chapters, domain)
     if requires_pw and not ai_profile.get("requires_playwright", False):
         logger.info("[Phase] %s: requires_playwright=True (JS-heavy detected)", domain)
     print(
@@ -112,24 +112,47 @@ async def run_learning_phase(
 
 # ── JS-heavy detection ────────────────────────────────────────────────────────
 
+_KNOWN_JS_HEAVY_DOMAINS = {
+    "royalroad.com", "www.royalroad.com",
+    "wattpad.com", "www.wattpad.com",
+    "webnovel.com", "www.webnovel.com",
+    "scribblehub.com", "www.scribblehub.com",
+    "wuxiaworld.com", "www.wuxiaworld.com",
+}
+
+
 def _detect_js_heavy(
     ai_profile    : dict,
     curl_html_ch1 : str | None,
     chapters      : list[tuple[str, str]],
+    domain        : str | None = None,
 ) -> bool:
     """
     Xác định site có cần Playwright không.
 
     Logic:
         1. AI flag requires_playwright = True → True
-        2. So sánh curl vs playwright text length cho Ch.1:
+        2. Domain nằm trong known-JS-heavy list → True
+        3. curl HTML chứa Cloudflare markers hoặc quá ngắn (<500 chars) → True
+        4. So sánh curl vs playwright text length cho Ch.1:
            nếu pw_len > curl_len × JS_CONTENT_RATIO AND diff > JS_MIN_DIFF_CHARS
            → True (JS-heavy site, content only visible after JS execution)
-
-    Replaces _build_pipeline_from_ai() JS detection logic (Batch B).
     """
     if ai_profile.get("requires_playwright", False):
         return True
+
+    if domain and domain.lower() in _KNOWN_JS_HEAVY_DOMAINS:
+        logger.info("[Phase] %s in known JS-heavy list → requires_playwright", domain)
+        return True
+
+    if curl_html_ch1:
+        from littrans.modules.scraper.utils.string_helpers import is_cloudflare_challenge
+        if is_cloudflare_challenge(curl_html_ch1):
+            logger.info("[Phase] curl returned CF challenge → requires_playwright")
+            return True
+        if len(curl_html_ch1) < 500:
+            logger.info("[Phase] curl HTML < 500 chars → requires_playwright")
+            return True
 
     if not curl_html_ch1 or not chapters:
         return False
@@ -209,7 +232,12 @@ async def _fetch_chapters(
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"  [{tag}] ⚠ Fetch Ch.{i+1} thất bại: {type(e).__name__}: {e}", flush=True)
+            import traceback
+            msg = str(e) or repr(e)
+            print(f"  [{tag}] ⚠ Fetch Ch.{i+1} thất bại: {type(e).__name__}: {msg}", flush=True)
+            for line in traceback.format_exc().splitlines()[-6:]:
+                if line.strip():
+                    print(f"  [{tag}]    {line}", flush=True)
             break
 
         if is_junk_page(html, status):

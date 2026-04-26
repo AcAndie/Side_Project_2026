@@ -12,16 +12,12 @@ for _p in [str(_ROOT), str(_ROOT / "src")]:
 
 import streamlit as st
 
-from littrans.ui.bible_ui                import render_bible_tab   as render_bible
-from littrans.ui.epub_ui                 import render_epub_tab    as render_epub
-from littrans.ui.scraper_page            import render_scraper
-from littrans.ui.pipeline_page           import render_pipeline
 from littrans.ui.pages.welcome_page      import render_welcome
+from littrans.ui.pages.library_page      import render_library
+from littrans.ui.pages.scrape_page       import render_scrape
 from littrans.ui.pages.translate_page    import render_translate
-from littrans.ui.pages.chapters_page     import render_chapters
-from littrans.ui.pages.characters_page   import render_characters
-from littrans.ui.pages.glossary_page     import render_glossary
-from littrans.ui.pages.stats_page        import render_stats
+from littrans.ui.pages.bible_page        import render_bible
+from littrans.ui.pages.export_page       import render_export
 from littrans.ui.pages.settings_page     import render_settings
 from littrans.ui.env_utils import _has_api_key, _get_available_novels, _apply_novel
 from littrans.ui.loaders   import load_chapters
@@ -34,50 +30,24 @@ st.set_page_config(
 )
 
 # ── Session state ─────────────────────────────────────────────────
+# Job state uses unified prefix scheme via core.state.JOB_KEYS.
+# Non-job keys (UI selections, artifacts) listed here.
+from littrans.ui.core.state import init_all_jobs
+
 _DEFAULTS: dict[str, Any] = {
-    "page"                  : "translate",
-    "running"               : False,
-    "run_thread"            : None,
-    "log_q"                 : None,
-    "logs"                  : [],
-    "rt_running"            : False,
-    "rt_thread"             : None,
-    "rt_q"                  : None,
-    "rt_logs"               : [],
+    "page"                  : "library",
     "sel_ch"                : 0,
     "show_rt"               : False,
-    "clean_running"         : False,
-    "clean_q"               : None,
-    "clean_logs"            : [],
-    "chars_action_running"  : False,
-    "chars_action_q"        : None,
-    "chars_action_logs"     : [],
     "settings_saved"        : False,
     "current_novel"         : "",
-    "bible_scan_running"    : False,
-    "bible_scan_q"          : None,
-    "bible_scan_logs"       : [],
-    "bible_crossref_running": False,
-    "bible_crossref_q"      : None,
-    "bible_crossref_logs"   : [],
     "bible_export_done"     : False,
-    "epub_running"          : False,
-    "epub_q"                : None,
-    "epub_logs"             : [],
+    # Artifacts (not job state)
     "last_export_file"      : None,
     "epub_export_bytes"     : None,
     "epub_export_novel"     : "",
-    "pipeline_running"      : False,
-    "pipeline_q"            : None,
-    "pipeline_logs"         : [],
-    "pipeline_stage"        : 0,
-    "_pl_mode"              : "",
-    "_pl_novel_name"        : "",
-    "_pl_result_holder"     : [],
-    "_pl_epub_path"         : "",
-    "scraper_running"           : False,
-    "scraper_q"                 : None,
-    "scraper_logs"              : [],
+    "md_zip_bytes"          : None,
+    "md_zip_novel"          : "",
+    # Scraper artifacts (the *job* state lives under sc_*)
     "scraper_result"            : None,
     "_scraper_result_holder"    : [],
     "_scraper_novel_name"       : "",
@@ -86,22 +56,44 @@ for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-# ── CSS ───────────────────────────────────────────────────────────
+init_all_jobs(st.session_state)
+
+# ── CSS (dark-first) ──────────────────────────────────────────────
 st.markdown("""<style>
 .badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;margin:1px}
-.badge-ok  {background:#EAF3DE;color:#3B6D11}
-.badge-warn{background:#FAEEDA;color:#633806}
-.badge-err {background:#FCEBEB;color:#791F1F}
-.badge-info{background:#E6F1FB;color:#0C447C}
-.badge-dim {background:#F1EFE8;color:#444441}
-.strong-lock{color:#3B6D11;font-size:11px}
-.weak-lock  {color:#BA7517;font-size:11px}
-.welcome-card{background:linear-gradient(135deg,#EEEDFE 0%,#E6F1FB 100%);
-  border-radius:16px;padding:32px;margin-bottom:24px;border:1px solid #d0cef8}
-.step-card{background:white;border-radius:12px;padding:20px;border:1px solid #e8e8e8;height:100%}
-.step-num{width:32px;height:32px;border-radius:50%;background:#3C3489;color:white;
+.badge-ok  {background:#1f3a1f;color:#8FD67C}
+.badge-warn{background:#3a2d14;color:#F0B969}
+.badge-err {background:#3a1717;color:#F28787}
+.badge-info{background:#152a3d;color:#7DB8F0}
+.badge-dim {background:#252830;color:#A0A4AB}
+.strong-lock{color:#8FD67C;font-size:11px}
+.weak-lock  {color:#F0B969;font-size:11px}
+.welcome-card{background:linear-gradient(135deg,#1E1F3D 0%,#15253A 100%);
+  border-radius:16px;padding:32px;margin-bottom:24px;border:1px solid #2f3160}
+.step-card{background:#1A1F2A;border-radius:12px;padding:20px;border:1px solid #2a2f3a;height:100%}
+.step-num{width:32px;height:32px;border-radius:50%;background:#6B5EF5;color:white;
   display:inline-flex;align-items:center;justify-content:center;
   font-weight:700;font-size:14px;margin-bottom:8px}
+
+/* Top nav */
+.topnav{display:flex;gap:6px;padding:8px 0 14px;border-bottom:1px solid #2a2f3a;margin-bottom:18px;flex-wrap:wrap}
+.topnav .stButton button{border-radius:8px;font-weight:600}
+
+/* Library cards */
+.lib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+.lib-card{background:#1A1F2A;border:1px solid #2a2f3a;border-radius:12px;padding:16px;
+  transition:transform .15s,border-color .15s;cursor:pointer}
+.lib-card:hover{transform:translateY(-2px);border-color:#6B5EF5}
+.lib-title{font-weight:700;font-size:15px;color:#E6E8EB;margin-bottom:8px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lib-meta{font-size:12px;color:#A0A4AB;margin-bottom:10px}
+.lib-bar{height:6px;background:#252830;border-radius:3px;overflow:hidden}
+.lib-bar-fill{height:100%;background:linear-gradient(90deg,#6B5EF5,#8B7EF8)}
+
+/* Reader typography */
+.reader-container{max-width:720px;margin:0 auto;padding:0 8px}
+.reader-text{font-family:Georgia,'Times New Roman',serif;line-height:1.8;font-size:17px;color:#D8DCE1}
+.reader-text p{margin:0 0 1em}
 </style>""", unsafe_allow_html=True)
 
 
@@ -126,9 +118,37 @@ def _render_novel_selector() -> None:
     )
     if selected != S.current_novel:
         S.current_novel = selected; _apply_novel(selected)
-        S.sel_ch = 0; S.logs = []; S.rt_logs = []; st.rerun()
+        S.sel_ch = 0; S.tx_logs = []; S.rt_logs = []; st.rerun()
     elif not S.current_novel:
         S.current_novel = selected; _apply_novel(selected)
+
+
+# ── Top nav (Phase 3: 5 tabs + Library) ───────────────────────────
+
+_NAV = [
+    ("library",   "🏠 Thư viện"),
+    ("scrape",    "🌐 Cào"),
+    ("translate", "🇻🇳 Dịch"),
+    ("bible",     "📖 Bible"),
+    ("export",    "📦 Export"),
+    ("settings",  "⚙️ Cài đặt"),
+]
+
+
+def _render_top_nav() -> None:
+    S = st.session_state
+    cols = st.columns(len(_NAV))
+    for col, (key, label) in zip(cols, _NAV):
+        with col:
+            if st.button(
+                label, key=f"topnav_{key}", use_container_width=True,
+                type="primary" if S.page == key else "secondary",
+            ):
+                S.page = key; S.show_rt = False; st.rerun()
+    st.markdown(
+        "<div style='height:8px;border-bottom:1px solid #2a2f3a;margin-bottom:14px'></div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ── Main ──────────────────────────────────────────────────────────
@@ -145,29 +165,10 @@ def main() -> None:
 
     with st.sidebar:
         st.markdown("## 📖 LiTTrans")
-        st.caption("v5.7 — LitRPG / Tu Tiên Pipeline")
+        st.caption("v5.7")
         st.divider()
 
         _render_novel_selector()
-        st.divider()
-
-        _pages = {
-            "pipeline"  : "🚀 Pipeline",
-            "scraper"   : "🌐 Cào Truyện",
-            "translate" : "📄 Dịch",
-            "chapters"  : "🔍 Xem chương",
-            "characters": "👤 Nhân vật",
-            "glossary"  : "📚 Từ điển",
-            "stats"     : "📊 Thống kê",
-            "settings"  : "⚙️ Cài đặt",
-            "bible"     : "📖 Bible System",
-            "epub"      : "📚 EPUB",
-        }
-        for key, label in _pages.items():
-            if st.button(label, key=f"nav_{key}", use_container_width=True,
-                         type="primary" if S.page == key else "secondary"):
-                S.page = key; S.show_rt = False; st.rerun()
-
         st.divider()
 
         try:
@@ -205,12 +206,13 @@ def main() -> None:
             pass
 
         for flag, msg in [
-            (S.pipeline_running,     "🚀 Đang pipeline…"),
-            (S.scraper_running,      "🌐 Đang cào…"),
-            (S.running,              "🔄 Đang dịch…"),
-            (S.rt_running,           "↺ Đang dịch lại…"),
-            (S.clean_running,        "🔄 Đang phân loại…"),
-            (S.chars_action_running, "👤 Đang xử lý nhân vật…"),
+            (S.get("sc_running"), "🌐 Đang cào…"),
+            (S.get("tx_running"), "🔄 Đang dịch…"),
+            (S.get("rt_running"), "↺ Đang dịch lại…"),
+            (S.get("bi_running"), "📖 Đang scan Bible…"),
+            (S.get("ep_running"), "📚 Đang xử lý EPUB…"),
+            (S.get("cg_running"), "🔄 Đang phân loại từ điển…"),
+            (S.get("cc_running"), "👤 Đang xử lý nhân vật…"),
         ]:
             if flag:
                 st.warning(msg)
@@ -231,19 +233,28 @@ def main() -> None:
         except Exception:
             pass
 
+    _render_top_nav()
+
+    # ── Global polling: drain ALL job queues regardless of current tab ──
+    # Replaces per-page poll/rerun loops (Phase 2). Threads keep running
+    # when user switches tabs; logs catch up on every rerun.
+    from littrans.ui.core.jobs import poll_all
+    import time as _time
+    _active = poll_all(S)
+
     _route = {
-        "pipeline"  : lambda: render_pipeline(S),
-        "scraper"   : lambda: render_scraper(S),
+        "library"   : render_library,
+        "scrape"    : lambda: render_scrape(S),
         "translate" : render_translate,
-        "chapters"  : render_chapters,
-        "characters": render_characters,
-        "glossary"  : render_glossary,
-        "stats"     : render_stats,
-        "settings"  : render_settings,
         "bible"     : lambda: render_bible(S),
-        "epub"      : lambda: render_epub(S),
+        "export"    : lambda: render_export(S),
+        "settings"  : render_settings,
     }
-    _route.get(S.page, render_translate)()
+    _route.get(S.page, render_library)()
+
+    if _active:
+        _time.sleep(0.9)
+        st.rerun()
 
 
 main()

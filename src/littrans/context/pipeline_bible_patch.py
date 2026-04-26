@@ -89,6 +89,113 @@ def build_bible_system_prompt(
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 2b. CONTEXT AUGMENT (Bible = ENHANCE, không REPLACE)
+# ═══════════════════════════════════════════════════════════════════
+
+# Map bible entity_type → glossary category (settings.glossary_files key)
+_ENTITY_TO_CATEGORY = {
+    "item"    : "items",
+    "location": "locations",
+    "faction" : "organizations",
+    "concept" : "general",
+}
+
+
+def _format_bible_term_line(entity: dict) -> str | None:
+    en  = (entity.get("en_name") or "").strip()
+    vn  = (entity.get("canonical_name") or "").strip()
+    if not en or not vn:
+        return None
+    desc = (entity.get("description") or "").strip()
+    if desc:
+        # Cắt mô tả dài để tiết kiệm token prompt
+        if len(desc) > 120:
+            desc = desc[:117] + "..."
+        return f"- {en}: {vn} — {desc}"
+    return f"- {en}: {vn}"
+
+
+def augment_ctx_from_bible(
+    glossary_ctx : dict[str, list[str]],
+    char_profiles: dict[str, str],
+    chapter_text : str,
+) -> tuple[int, int]:
+    """
+    Bổ sung (KHÔNG overwrite) glossary_ctx và char_profiles từ Bible Store
+    cho các entity xuất hiện trong chapter_text.
+
+    Returns: (n_glossary_added, n_chars_added).
+    """
+    from littrans.config.settings import settings
+    from littrans.context.bible_store import BibleStore
+    from littrans.core.patterns import word_boundary_search
+
+    if not settings.bible_available:
+        return 0, 0
+
+    store = BibleStore(settings.bible_dir)
+
+    # ── Glossary augment ────────────────────────────────────────
+    n_g = 0
+    for entity_type, cat in _ENTITY_TO_CATEGORY.items():
+        try:
+            entities = store.get_all_entities(entity_type)
+        except Exception as _e:
+            logging.exception(f"[BiblePatch] get_all_entities({entity_type}): {_e}")
+            continue
+        for ent in entities:
+            en  = (ent.get("en_name") or "").strip()
+            vn  = (ent.get("canonical_name") or "").strip()
+            if not en or not vn:
+                continue
+            if not (word_boundary_search(en, chapter_text) or
+                    word_boundary_search(vn.strip("[]"), chapter_text)):
+                continue
+            line = _format_bible_term_line(ent)
+            if line is None:
+                continue
+            cat_lines = glossary_ctx.setdefault(cat, [])
+            # Skip nếu en_name đã có trong category (tránh duplicate)
+            key_lc = en.lower()
+            if any(key_lc in (l or "").lower() for l in cat_lines):
+                continue
+            cat_lines.append(line)
+            n_g += 1
+
+    # ── Characters augment ──────────────────────────────────────
+    n_c = 0
+    try:
+        bible_chars = store.get_all_characters()
+    except Exception as _e:
+        logging.exception(f"[BiblePatch] get_all_characters: {_e}")
+        bible_chars = []
+
+    for bc in bible_chars:
+        name = (bc.get("canonical_name") or "").strip() \
+            or (bc.get("en_name") or "").strip()
+        if not name or len(name) < 2 or name in char_profiles:
+            continue
+        # Match trên en_name + canonical + aliases
+        candidates = [bc.get("en_name", ""), bc.get("canonical_name", "")]
+        candidates.extend(bc.get("aliases") or [])
+        if not any(c and word_boundary_search(c, chapter_text) for c in candidates):
+            continue
+        # Mini stub profile (Pre-call chỉ cần biết name; Bible prompt builder
+        # tự fetch full profile từ store)
+        stub_lines = [
+            f"### {name}  [BIBLE] [{bc.get('role','?')}]",
+            f"**Pronoun_self:** {bc.get('pronoun_self','—')}",
+        ]
+        personality = bc.get("personality_summary", "")
+        if personality:
+            stub_lines.append(f"**Personality:** {personality}")
+        char_profiles[name] = "\n".join(stub_lines)
+        n_c += 1
+
+    return n_g, n_c
+
+
+# ═══════════════════════════════════════════════════════════════════
 # 3. POST-CHAPTER UPDATE
 # ═══════════════════════════════════════════════════════════════════
 

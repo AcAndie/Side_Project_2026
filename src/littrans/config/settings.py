@@ -3,9 +3,7 @@ src/littrans/config/settings.py — Toàn bộ cấu hình pipeline.
 
 Chỉnh qua .env, KHÔNG sửa file này.
 
-[FIX] Xoá _bible_dir_raw field không dùng.
-      bible_dir property giờ đọc BIBLE_DIR từ .env (nếu set) thay vì bỏ qua.
-      Backward compat: không set BIBLE_DIR → dùng novel_data_dir/bible như cũ.
+_bible_dir_env: đọc BIBLE_DIR từ .env (nếu set); không set → dùng novel_data_dir/bible.
 """
 from __future__ import annotations
 
@@ -149,9 +147,6 @@ class Settings:
         "gemini-1.5-flash",
     })
 
-    # src/littrans/config/settings.py
-# Chỉ thay đổi trong __post_init__ và thêm 1 method mới
-
     def __post_init__(self) -> None:
         if not self.gemini_api_key:
             sys.exit("❌ Thiếu GEMINI_API_KEY trong .env")
@@ -269,11 +264,26 @@ class Settings:
             return self.novel_data_dir / "bible"
         if self._bible_dir_env:                      # flat mode: dùng BIBLE_DIR env
             return Path(self._bible_dir_env)
-        return self.data_dir / "bible"               # flat mode: default@
+        return self.data_dir / "bible"               # flat mode: default
 
     @property
     def bible_available(self) -> bool:
         return (self.bible_dir / "meta.json").exists()
+
+    def ensure_bible_initialized(self) -> bool:
+        """
+        Khởi tạo bible_dir + meta.json nếu chưa có. Gọi explicit khi user
+        bật Bible toggle hoặc render Bible tab. KHÔNG đặt trong property
+        (tránh side-effect khi `bible_available` bị check ở mọi pipeline path).
+
+        Returns: True nếu vừa tạo mới, False nếu đã tồn tại.
+        """
+        meta = self.bible_dir / "meta.json"
+        if meta.exists():
+            return False
+        self.bible_dir.mkdir(parents=True, exist_ok=True)
+        meta.write_text('{"version":1,"initialized":true}', encoding="utf-8")
+        return True
 
     @property
     def epub_dir(self) -> Path:

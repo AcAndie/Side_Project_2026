@@ -24,6 +24,7 @@ from littrans.utils.retry_utils import is_retriable
 
 _MAX_RETRIES   = 5
 _RETRY_BACKOFF = [30, 60, 120, 240]
+_AI_CALL_TIMEOUT = 90.0  # seconds per single AI call — prevents UI hang
 
 
 def _fmt(e: Exception) -> str:
@@ -49,23 +50,44 @@ async def _call(
                     response_mime_type="application/json",
                     response_schema=schema,
                 )
-                resp = await ai_client.aio.models.generate_content(
-                    model=model, contents=prompt, config=config,
+                resp = await asyncio.wait_for(
+                    ai_client.aio.models.generate_content(
+                        model=model, contents=prompt, config=config,
+                    ),
+                    timeout=_AI_CALL_TIMEOUT,
                 )
             else:
-                resp = await ai_client.aio.models.generate_content(
-                    model=model, contents=prompt,
+                resp = await asyncio.wait_for(
+                    ai_client.aio.models.generate_content(
+                        model=model, contents=prompt,
+                    ),
+                    timeout=_AI_CALL_TIMEOUT,
                 )
             return resp.text
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError as e:
+            is_last = attempt >= _MAX_RETRIES - 1
+            last_retriable_err = e
+            if not is_last:
+                wait = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
+                suffix = f" [{model}]" if _use_fallback else ""
+                print(
+                    f"  [AI] ⏱ Timeout {_AI_CALL_TIMEOUT:.0f}s (lần {attempt+1}/{_MAX_RETRIES}){suffix},"
+                    f" thử lại sau {wait}s",
+                    flush=True,
+                )
+                await asyncio.sleep(wait)
         except Exception as e:
             is_last  = attempt >= _MAX_RETRIES - 1
             err_str  = _fmt(e).lower()
             if schema and ("response_schema" in err_str or "mime_type" in err_str):
                 try:
-                    resp = await ai_client.aio.models.generate_content(
-                        model=model, contents=prompt,
+                    resp = await asyncio.wait_for(
+                        ai_client.aio.models.generate_content(
+                            model=model, contents=prompt,
+                        ),
+                        timeout=_AI_CALL_TIMEOUT,
                     )
                     return resp.text
                 except Exception:

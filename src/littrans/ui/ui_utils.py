@@ -92,20 +92,6 @@ p{{margin-bottom:10px}}p:last-child{{margin:0}}
 </div></body></html>""", height=height + 6, scrolling=False)
 
 
-def _poll(q_key: str, logs_key: str, thread_key: str | None = None) -> bool:
-    from littrans.ui.runner import poll_queue as _pq
-    S = st.session_state
-    q = S.get(q_key)
-    if q is None:
-        return False
-    done, _ = _pq(q, S[logs_key])
-    if not done and thread_key:
-        t = S.get(thread_key)
-        if t is not None and not t.is_alive():
-            S[logs_key].append("⚠️  Thread dừng bất ngờ.")
-            done = True
-    return done
-
 
 def _show_log(logs: list[str]) -> None:
     st.code("\n".join(logs[-300:]) if logs else "(chờ log...)", language=None)

@@ -3,33 +3,8 @@
 > Dự án: `C:\Users\FPT MONG CAI\Desktop\NovelPipeline\`
 > Stack: Python 3.11+, Streamlit, Gemini/Claude API, Playwright, ebooklib
 
-## Refactor Batch Plan (2026-04-22)
-
-Kế hoạch: phát hiện 6 duplication hotspots + 5 perf bottlenecks → fix theo batch.
-Chi tiết đầy đủ: `.claude/plans/review-to-n-b-codebase-iterative-treasure.md`
-
-```
-Batch 1 — Benchmark baseline          [x] DONE 2026-04-22
-           bench.py + instrument pipeline.py + scraper.py
-Batch 2 — Unified retry decorator     [x] DONE 2026-04-22
-           retry_utils.py + epub_processor + bible_scanner + agents.py
-Batch 3 — UI polling dedup            [x] DONE 2026-04-22
-           poll_queue() → runner.py; replace 5 drain loops + fix epub add_script_run_ctx
-Batch 4 — Cache glossary/characters   [x] DONE 2026-04-22
-           glossary._load_all() cached by content-hash; chars cached by mtime_ns
-Batch 5 — Scraper HTML parse reuse    [x] DONE 2026-04-22
-           PipelineContext.get_soup() lazy cache; remove duplicate parse in find_start_chapter
-Batch 6 — I/O helpers + misc dedup   [x] DONE 2026-04-22
-           load_json_safe() → io_utils; parse_markdown public → glossary; ads_filter module-level cache
-Batch 7 — Split oversized files       [x] DONE 2026-04-22
-           app.py(1413→249) + pages/ package (7 pages); agents.py(955→~350) + agents_helpers.py;
-           bible_scanner.py(781→~430) + bible_response_parser.py;
-           loaders.py + env_utils.py + ui_utils.py extracted from app.py
-```
-
-**Sau Batch 1:** chạy translate + scrape để lấy `data/bench.jsonl` baseline trước khi làm Batch 4.
-
----
+> **Open bug plan:** [BUGFIX_PLAN.md](BUGFIX_PLAN.md) — danh sách lỗi đang chờ fix
+> (P0/P1/P2). Đọc trước khi sửa code trong working tree hiện tại.
 
 ## Project structure
 
@@ -46,14 +21,23 @@ NovelPipeline/
 │   │   └── epub_exporter.py     ← outputs/{novel}/*_VN.txt → .epub (BytesIO)
 │   ├── utils/
 │   │   ├── io_utils.py          ← load_text, atomic_write
-│   │   └── bench.py             ← measure()/timed() → data/bench.jsonl [B1]
-│   └── ui/
-│       ├── app.py               ← Streamlit entry point (v5.6)
-│       ├── pipeline_page.py     ← 1-click pipeline: scrape/epub → translate
-│       ├── scraper_page.py      ← Standalone scraper UI
-│       ├── runner.py            ← ScrapeRunner, PipelineRunner, run_background()
-│       ├── epub_ui.py           ← EPUB processor UI
-│       └── bible_ui.py          ← Bible System UI
+│   │   └── bench.py             ← measure()/timed() → data/bench.jsonl
+│   └── ui/                      ← Streamlit UI (Phase 3 — 5 tab)
+│       ├── app.py               ← Entry point + router + global poll_all
+│       ├── runner.py            ← ScrapeRunner, PipelineRunner, run_background
+│       ├── bible_ui.py          ← (backing) re-exported via pages/bible_page
+│       ├── epub_ui.py           ← (backing) re-exported via pages/export_page
+│       ├── core/
+│       │   ├── state.py         ← JOB_KEYS + init_all_jobs + reset_job
+│       │   └── jobs.py          ← poll_all() — global queue drainer
+│       └── pages/
+│           ├── library_page.py  ← landing (novel grid)
+│           ├── welcome_page.py  ← first-run setup
+│           ├── scrape_page.py   ← 🌐 Cào
+│           ├── translate_page.py← 🇻🇳 Dịch (run + reader + delete chapter)
+│           ├── bible_page.py    ← 📖 Bible (no Export sub-tab)
+│           ├── export_page.py   ← 📦 Export (EPUB / MD-zip / Bible export)
+│           └── settings_page.py ← ⚙️ Cài đặt (+ Stats/Characters/Glossary expanders)
 ├── scripts/
 │   ├── run_ui.py                ← Start Streamlit UI
 │   └── main.py                  ← CLI entry point
@@ -66,6 +50,28 @@ NovelPipeline/
 
 ---
 
+## Phase 2 — Job session-state schema (added 2026-04-25)
+
+Mọi background job dùng prefix-based keys (định nghĩa trong [src/littrans/ui/core/state.py](src/littrans/ui/core/state.py)):
+
+| Prefix | Job |
+|---|---|
+| `tx` | Translate (full pipeline run) |
+| `sc` | Scrape |
+| `rt` | Retranslate one chapter |
+| `bi` | Bible scan |
+| `ep` | EPUB processor |
+| `cg` | Clean glossary |
+| `cc` | Clean characters |
+
+7 keys per prefix: `{p}_running`, `{p}_q`, `{p}_logs`, `{p}_thread`, `{p}_last_log`, `{p}_result`, `{p}_error`.
+
+**Polling rule**: chỉ `app.py` gọi `poll_all(S)` (từ [src/littrans/ui/core/jobs.py](src/littrans/ui/core/jobs.py)) trước khi dispatch page. Pages KHÔNG được tự gọi `poll_queue` hoặc `time.sleep + st.rerun` cho job của mình. Pages chỉ render log + dispatch start.
+
+**Queue reuse**: trước khi tạo `queue.Queue()` mới phải check `S.{p}_thread` còn alive không. Nếu còn → block start, để job cũ chạy tiếp. Helper `reset_job(S, prefix)` chỉ gọi khi chắc chắn thread cũ đã chết.
+
+---
+
 ## 4 pitfalls KHÔNG được quên
 
 | # | Pitfall | Fix |
@@ -74,6 +80,8 @@ NovelPipeline/
 | 2 | `def DATA_DIR() -> Path` → call site `DATA_DIR / "x"` TypeError | Option A (`settings.data_dir`) hoặc B (`_LazyPath`) — KHÔNG mix |
 | 3 | `startswith("GEMINI_API_KEY")` nhặt nhầm `_DEV`, `_OLD`... | Strict regex `^GEMINI_API_KEY_\d+$` |
 | 4 | `run_scraper_blocking` từ Streamlit → UI treo | CLI only; UI dùng `ScrapeRunner` + polling |
+| 5 | Cache module-level (vd `_char_active_cache`) không invalidate sau write → stale reads | Sau mọi `save_json` / `atomic_write` phải reset cache về `None` |
+| 6 | Scratch comments leak khi dán code (`# src/littrans/.../...`) | Trước commit grep `^# src/littrans/` để dọn |
 
 ---
 

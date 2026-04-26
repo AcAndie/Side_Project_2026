@@ -168,25 +168,50 @@ async def find_start_chapter(
                 progress["start_url"] = start_url
                 return found, progress
 
-    # Heuristic fallback: lấy link chapter đầu tiên từ HTML khi AI thất bại
-    # Regex match href có pattern chapter/chap/c/s/số
+    # Heuristic fallback: pick chapter link có số nhỏ nhất (likely ch.1)
+    # Extended regex: cover royalroad `/fiction/N/chapter/N`, wuxiaworld `/novel/.../chXX`, etc.
     _CHAPTER_HREF_RE = re.compile(
-        r"/(?:chapter|chuong|chap|c|ch)[_\-]?\d+"
+        r"/(?:chapter|chuong|chap|ch|c|ep|episode|part)[_\-/]?\d+"
         r"|/s/\d+/\d+"
-        r"|/(?:episode|ep|part)[_\-]?\d+",
+        r"|/fiction/\d+/chapter/"
+        r"|/novel/[\w\-]+/(?:ch[a-z]*[\-_]?)?\d+",
         re.IGNORECASE,
     )
+    _NUM_IN_HREF_RE = re.compile(r"(\d+)(?!.*\d)")  # last number in href
+    from urllib.parse import urljoin
+
+    candidates: list[tuple[int, str]] = []
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        if _CHAPTER_HREF_RE.search(href):
-            from urllib.parse import urljoin
-            full = urljoin(start_url, href)
-            if full != start_url:
-                print(f"  [{tag}] ⚡ Heuristic fallback → {full[:65]}", flush=True)
-                progress["start_url"] = start_url
-                return full, progress
+        if not _CHAPTER_HREF_RE.search(href):
+            continue
+        full = urljoin(start_url, href)
+        if full == start_url or not full.startswith("http"):
+            continue
+        m = _NUM_IN_HREF_RE.search(href)
+        num = int(m.group(1)) if m else 999999
+        candidates.append((num, full))
 
-    raise RuntimeError(f"Không tìm được điểm bắt đầu: {start_url}")
+    if candidates:
+        # De-dup by url, keep smallest num
+        seen: dict[str, int] = {}
+        for num, full in candidates:
+            if full not in seen or num < seen[full]:
+                seen[full] = num
+        picked = min(seen.items(), key=lambda x: x[1])[0]
+        print(f"  [{tag}] ⚡ Heuristic fallback → {picked[:65]}", flush=True)
+        progress["start_url"] = start_url
+        return picked, progress
+
+    # Error rõ ràng: bao nhiêu <a> tag, có CF không, page_type là gì
+    from littrans.modules.scraper.utils.string_helpers import is_cloudflare_challenge
+    n_links = len(soup.find_all("a"))
+    cf      = is_cloudflare_challenge(html)
+    raise RuntimeError(
+        f"Không tìm được điểm bắt đầu: {start_url} "
+        f"(page_type={page_type}, links={n_links}, cf_challenge={cf}, html_len={len(html)}). "
+        f"Gợi ý: thử paste thẳng URL chapter 1, hoặc `!relearn {urlparse(start_url).netloc}`."
+    )
 
 
 # ── scrape_one_chapter ────────────────────────────────────────────────────────

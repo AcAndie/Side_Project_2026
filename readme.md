@@ -603,11 +603,10 @@ NovelPipeline/
 │   │   └── epub_exporter.py   ← outputs/{novel}/*_VN.txt → .epub
 │   └── ui/
 │       ├── app.py           ← Streamlit entry point (router)
-│       ├── pages/           ← Từng trang UI riêng
-│       ├── pipeline_page.py ← Pipeline 1-click
-│       ├── scraper_page.py  ← Scraper UI
-│       ├── epub_ui.py       ← EPUB processor UI
-│       ├── bible_ui.py      ← Bible System UI
+│       ├── core/            ← state.py, jobs.py (Phase 2 job schema)
+│       ├── pages/           ← library, welcome, scrape, translate, bible, export, settings
+│       ├── bible_ui.py      ← Bible System UI (backing)
+│       ├── epub_ui.py       ← EPUB processor UI (backing)
 │       └── runner.py        ← Background thread runners
 │
 ├── scripts/

@@ -58,10 +58,16 @@ def render_bible_tab(S: Any) -> None:
 
     st.subheader("📖 Bible System")
 
+    # Ensure bible_dir + meta.json exist (explicit init, không side-effect trong property)
+    try:
+        from littrans.config.settings import settings as _settings
+        if _settings.ensure_bible_initialized():
+            st.toast("📖 Bible directory đã được khởi tạo.")
+    except Exception as e:
+        st.error(f"Không khởi tạo được Bible dir: {e}")
+
+    # bi_* job state initialized via init_all_jobs(app.py). Only legacy keys here.
     for key, default in [
-        ("bible_scan_running", False),
-        ("bible_scan_q",       None),
-        ("bible_scan_logs",    []),
         ("bible_crossref_running", False),
         ("bible_crossref_q",   None),
         ("bible_crossref_logs",[]),
@@ -74,13 +80,13 @@ def render_bible_tab(S: Any) -> None:
         _render_bible_empty(S)
         return
 
+    # Phase 3: Export sub-tab moved to tab Export (see pages/export_page.py)
     tabs = st.tabs([
         "📊 Overview",
         "🗃️ Database",
         "🌍 WorldBuilding",
         "📜 Main Lore",
         "🔍 Consistency",
-        "⬇️ Export",
     ])
 
     with tabs[0]: _render_overview(S)
@@ -88,7 +94,6 @@ def render_bible_tab(S: Any) -> None:
     with tabs[2]: _render_worldbuilding(S)
     with tabs[3]: _render_main_lore(S)
     with tabs[4]: _render_consistency(S)
-    with tabs[5]: _render_export(S)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -173,7 +178,7 @@ def _render_overview(S: Any) -> None:
         if st.button("🔄 Consolidate ngay", key="ov_consolidate"):
             _run_consolidation()
 
-    if S.bible_scan_running or S.bible_scan_logs:
+    if S.bi_running or S.bi_logs:
         _handle_scan_log(S)
 
 
@@ -182,21 +187,27 @@ def _render_scan_controls(S, depth, force=False, new_only=True,
     import streamlit as st
     container = col or st
 
-    if not S.bible_scan_running:
+    bi_alive = S.bi_running and S.bi_thread is not None and \
+               getattr(S.bi_thread, "is_alive", lambda: False)()
+
+    if not bi_alive:
         if container.button(label, type="primary", key=f"scan_btn_{label[:4]}"):
-            S.bible_scan_logs = []
-            S.bible_scan_q    = queue.Queue()
-            _launch_bible_scan(S.bible_scan_q, depth=depth,
-                               force=force, new_only=new_only)
-            S.bible_scan_running = True
+            from littrans.ui.core.state import reset_job
+            reset_job(S, "bi")
+            S.bi_logs = []
+            S.bi_q    = queue.Queue()
+            S.bi_thread = _launch_bible_scan(S.bi_q, depth=depth,
+                                             force=force, new_only=new_only)
+            S.bi_running  = True
+            S.bi_last_log = time.time()
             st.rerun()
     else:
-        container.button("⏳ Đang scan…", disabled=True, key="scan_running")
+        container.button("⏳ Đang scan… (có thể chuyển tab)", disabled=True, key="scan_running")
 
 
 def _launch_bible_scan(log_queue: queue.Queue, depth: str,
-                        force: bool, new_only: bool) -> None:
-    """Chạy BibleScanner trong background thread."""
+                        force: bool, new_only: bool):
+    """Chạy BibleScanner trong background thread. Returns the Thread."""
     import threading, sys, traceback
 
     def _worker():
@@ -217,8 +228,8 @@ def _launch_bible_scan(log_queue: queue.Queue, depth: str,
         try:
             from littrans.config.settings import settings
             object.__setattr__(settings, "bible_scan_depth", depth)
-            from littrans.context.bible_scanner import BibleScanner   # FIX
-            from littrans.context.bible_store   import BibleStore      # FIX
+            from littrans.context.bible_scanner import BibleScanner
+            from littrans.context.bible_store   import BibleStore
             store   = BibleStore(settings.bible_dir)
             scanner = BibleScanner(store)
             if new_only:
@@ -235,27 +246,28 @@ def _launch_bible_scan(log_queue: queue.Queue, depth: str,
             log_queue.put("__DONE__")
 
     t = threading.Thread(target=_worker, daemon=True)
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx
+        add_script_run_ctx(t)
+    except ImportError:
+        pass
     t.start()
+    return t
 
 
 def _handle_scan_log(S: Any) -> None:
+    """Render only — drain handled by app.py poll_all."""
     import streamlit as st
-    from littrans.ui.runner import poll_queue
-    if S.bible_scan_running:
-        done, _ = poll_queue(S.bible_scan_q, S.bible_scan_logs)
-        if done:
-            S.bible_scan_running = False
-            S.bible_scan_logs.append("─" * 56)
-            S.bible_scan_logs.append("✅ Scan hoàn tất.")
-            st.cache_data.clear()
-
-    if S.bible_scan_logs:
+    if S.bi_logs:
         st.markdown("**Scan log:**")
-        st.code("\n".join(S.bible_scan_logs[-200:]), language=None)
+        st.code("\n".join(S.bi_logs[-200:]), language=None)
 
-    if S.bible_scan_running:
-        time.sleep(1.0)
-        st.rerun()
+    # Cache invalidate once after job ends
+    if (not S.bi_running) and S.bi_logs and not S.get("_bi_post_clear_done"):
+        st.cache_data.clear()
+        S["_bi_post_clear_done"] = True
+    if S.bi_running:
+        S["_bi_post_clear_done"] = False
 
 
 def _run_consolidation() -> None:
@@ -520,22 +532,23 @@ def _render_main_lore(S: Any) -> None:
 
 def _render_consistency(S: Any) -> None:
     import streamlit as st
+    from littrans.ui.core.state import reset_job
 
     col1, col2 = st.columns([2, 1])
     col1.markdown("### 🔍 Bible Consistency Check")
 
     run_btn = col2.button("▶ Chạy Validate", type="primary", key="crossref_run",
-                           disabled=S.bible_crossref_running)
+                           disabled=bool(S.get("cr_running")))
 
     if run_btn:
-        S.bible_crossref_logs = []
-        S.bible_crossref_q    = queue.Queue()
-        _launch_crossref(S.bible_crossref_q)
-        S.bible_crossref_running = True
+        reset_job(S, "cr")
+        S.cr_q = queue.Queue()
+        _launch_crossref(S.cr_q)
+        S.cr_running = True
         st.rerun()
 
-    if S.bible_crossref_running or S.bible_crossref_logs:
-        _handle_crossref_log(S)
+    if S.get("cr_running") or S.get("cr_logs"):
+        st.code("\n".join(S.get("cr_logs", [])), language=None)
         return
 
     try:
@@ -589,31 +602,22 @@ def _launch_crossref(log_queue: queue.Queue) -> None:
             sys.stdout = old_out
             log_queue.put("__DONE__")
 
-    threading.Thread(target=_worker, daemon=True).start()
+    _t = threading.Thread(target=_worker, daemon=True)
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx
+        add_script_run_ctx(_t)
+    except ImportError:
+        pass
+    _t.start()
 
 
-def _handle_crossref_log(S: Any) -> None:
-    import streamlit as st
-    from littrans.ui.runner import poll_queue
-    if S.bible_crossref_running:
-        done, _ = poll_queue(S.bible_crossref_q, S.bible_crossref_logs)
-        if done:
-            S.bible_crossref_running = False
-            S.bible_crossref_logs.append("✅ Cross-reference hoàn tất.")
-
-    if S.bible_crossref_logs:
-        st.code("\n".join(S.bible_crossref_logs), language=None)
-
-    if S.bible_crossref_running:
-        time.sleep(1.0)
-        st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════
 # EXPORT
 # ═══════════════════════════════════════════════════════════════════
 
-def _render_export(S: Any) -> None:
+def render_bible_export(S: Any) -> None:
     import streamlit as st
 
     st.markdown("### ⬇️ Export Bible")

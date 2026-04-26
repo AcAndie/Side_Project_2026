@@ -235,21 +235,28 @@ class Pipeline:
         name_lock    = build_name_lock_table()
         known_skills = load_skills_for_chapter(text)
 
-        if settings.bible_mode and settings.bible_available:
-            glossary_ctx  = {}
-            char_profiles = {}
-            arc_mem       = ""
-            ctx_notes     = ""
-            print(f"     [Bible mode] Name Lock: {len(name_lock)} · Skills: {len(known_skills)}")
+        with measure("ctx_filter", ch=chapter_index):
+            glossary_ctx  = filter_glossary(text)
+            char_profiles = filter_characters(text)
+        arc_mem   = load_arc_memory()
+        ctx_notes = load_context_notes()
+
+        bible_on = settings.bible_mode and settings.bible_available
+        if bible_on:
+            try:
+                from littrans.context.pipeline_bible_patch import augment_ctx_from_bible
+                n_g, n_c = augment_ctx_from_bible(glossary_ctx, char_profiles, text)
+                tag = f"[Bible+{n_g}g+{n_c}c] "
+            except Exception as _e:
+                logging.exception(f"[Pipeline] Bible augment lỗi: {_e}")
+                print(f"  ⚠ [Bible augment] {_e}", flush=True)
+                tag = "[Bible-augment-FAIL] "
         else:
-            with measure("ctx_filter", ch=chapter_index):
-                glossary_ctx  = filter_glossary(text)
-                char_profiles = filter_characters(text)
-            arc_mem       = load_arc_memory()
-            ctx_notes     = load_context_notes()
-            total_terms   = sum(len(v) for v in glossary_ctx.values())
-            print(f"     Glossary: {total_terms} · Characters: {len(char_profiles)} · "
-                  f"Name Lock: {len(name_lock)} · Skills: {len(known_skills)}")
+            tag = ""
+
+        total_terms = sum(len(v) for v in glossary_ctx.values())
+        print(f"     {tag}Glossary: {total_terms} · Characters: {len(char_profiles)} · "
+              f"Name Lock: {len(name_lock)} · Skills: {len(known_skills)}")
 
         # ── Step 1: Pre-call ──────────────────────────────────────
         print(f"  🔍 Pre-call...")
@@ -266,7 +273,7 @@ class Pipeline:
         time.sleep(settings.pre_call_sleep)
 
         # ── Step 2: Build system prompt ───────────────────────────
-        if settings.bible_mode and settings.bible_available:
+        if bible_on:
             from littrans.context.pipeline_bible_patch import build_bible_system_prompt
             system_prompt = build_bible_system_prompt(
                 instructions = self._instructions,
@@ -379,67 +386,66 @@ class Pipeline:
             if post_result.passed or not post_result.has_retry_required():
                 break
 
-            # src/littrans/core/pipeline.py
-# Tìm và thay thế đoạn sau trong _translate_three_call():
-# (phần if/else cuối của post-call loop)
-
             if (settings.trans_retry_on_quality
-                            and post_attempt <= settings.post_call_max_retries):
+                    and post_attempt <= settings.post_call_max_retries):
 
-                        # ── Bước 1: Auto-fix (targeted, rẻ hơn full retry) ──────
-                        n_retry_issues = sum(
-                            1 for i in post_result.issues
-                            if i.severity == "retry_required"
-                        )
-                        print(f"  🔧 Auto-fix {n_retry_issues} lỗi (trước khi retry Trans-call)...")
+                # ── Bước 1: Auto-fix (targeted, rẻ hơn full retry) ──────
+                n_retry_issues = sum(
+                    1 for i in post_result.issues
+                    if i.severity == "retry_required"
+                )
+                print(f"  🔧 Auto-fix {n_retry_issues} lỗi (trước khi retry Trans-call)...")
+                time.sleep(settings.post_call_sleep)
+
+                try:
+                    from littrans.core.post_analyzer import auto_fix_translation
+                    fixed_tl, fix_descs = auto_fix_translation(
+                        final_translation,
+                        post_result.issues,
+                        name_lock,
+                        filename,
+                    )
+                except Exception as _fe:
+                    logging.warning(f"{filename} | auto_fix: {_fe}")
+                    fixed_tl, fix_descs = final_translation, []
+
+                if fix_descs:
+                    # Auto-fix thành công → apply pp + để loop tiếp tục verify
+                    final_translation, pp_changes = pp_run(fixed_tl)
+                    if pp_changes:
+                        print(pp_report(pp_changes))
+                    print(f"  ✅ Auto-fix xong ({len(fix_descs)} lỗi đã vá):")
+                    for desc in fix_descs:
+                        print(f"     • {desc}")
+                    time.sleep(settings.post_call_sleep)
+                    # Tiếp tục loop → post-call sẽ verify lại
+                else:
+                    # ── Bước 2: Auto-fix thất bại → fallback full retry ─
+                    print(f"  ⚠️  Auto-fix thất bại → Retry Trans-call toàn bộ...")
+                    retry_instruction = post_result.retry_instruction
+                    time.sleep(settings.post_call_sleep)
+
+                    try:
+                        input_text = f"⚠️ RETRY — {retry_instruction}\n\n---\n\n{text}"
+                        final_translation = call_translation(system_prompt, input_text)
+                        final_translation, pp_changes = pp_run(final_translation)
+                        if pp_changes:
+                            print(pp_report(pp_changes))
                         time.sleep(settings.post_call_sleep)
-
-                        try:
-                            from littrans.core.post_analyzer import auto_fix_translation
-                            fixed_tl, fix_descs = auto_fix_translation(
-                                final_translation,
-                                post_result.issues,
-                                name_lock,
-                                filename,
-                            )
-                        except Exception as _fe:
-                            logging.warning(f"{filename} | auto_fix: {_fe}")
-                            fixed_tl, fix_descs = final_translation, []
-
-                        if fix_descs:
-                            # Auto-fix thành công → apply pp + để loop tiếp tục verify
-                            final_translation, pp_changes = pp_run(fixed_tl)
-                            if pp_changes:
-                                print(pp_report(pp_changes))
-                            print(f"  ✅ Auto-fix xong ({len(fix_descs)} lỗi đã vá):")
-                            for desc in fix_descs:
-                                print(f"     • {desc}")
-                            time.sleep(settings.post_call_sleep)
-                            # Tiếp tục loop → post-call sẽ verify lại
-                        else:
-                            # ── Bước 2: Auto-fix thất bại → fallback full retry ─
-                            print(f"  ⚠️  Auto-fix thất bại → Retry Trans-call toàn bộ...")
-                            retry_instruction = post_result.retry_instruction
-                            time.sleep(settings.post_call_sleep)
-
-                            try:
-                                input_text = f"⚠️ RETRY — {retry_instruction}\n\n---\n\n{text}"
-                                final_translation = call_translation(system_prompt, input_text)
-                                final_translation, pp_changes = pp_run(final_translation)
-                                if pp_changes:
-                                    print(pp_report(pp_changes))
-                                time.sleep(settings.post_call_sleep)
-                            except Exception as e:
-                                logging.error(f"{filename} | post retry trans | {e}")
-                                print(f"  ❌ Retry Trans lỗi: {e}")
-                                break
-            else:
-                        print(
-                            f"  ⚠️  Vẫn còn lỗi dịch thuật sau {settings.post_call_max_retries} "
-                            f"lần retry → ghi file để review"
-                        )
-                        final_translation = post_result.final_translation
+                    except Exception as e:
+                        logging.error(f"{filename} | post retry trans | {e}")
+                        print(f"  ❌ Retry Trans lỗi: {e}")
                         break
+            else:
+                if not settings.trans_retry_on_quality:
+                    print("  ⚠️  trans_retry_on_quality=False → ghi file để review")
+                else:
+                    print(
+                        f"  ⚠️  Vẫn còn lỗi sau {settings.post_call_max_retries} "
+                        f"lần retry → ghi file để review"
+                    )
+                final_translation = post_result.final_translation
+                break
 
         # ── Name Lock validate ────────────────────────────────────
         violations = validate_translation(final_translation, name_lock)
@@ -454,13 +460,14 @@ class Pipeline:
         print(f"  ✅ Dịch xong: {filename}")
 
         # ── [Bible Mode] Update MainLore từ post metadata ─────────
-        if settings.bible_mode and settings.bible_available and post_result.ok:
+        # Relax: chạy nếu có ANY structured data, không chỉ khi post.ok
+        if bible_on and (post_result.ok or post_result.new_characters or post_result.new_terms):
             try:
                 from littrans.context.pipeline_bible_patch import update_bible_from_post
                 update_bible_from_post(post_result, filename, text)
             except Exception as _e:
-                logging.warning(f"[Pipeline] Bible update lỗi {filename}: {_e}")
-                print(f"  ⚠️  Bible update lỗi: {_e}")
+                logging.exception(f"[Pipeline] Bible update lỗi {filename}: {_e}")
+                print(f"  ⚠️  Bible update lỗi: {_e}", flush=True)
 
         # ── Update data từ Post-call metadata ─────────────────────
         if not skip_data_update:
@@ -506,11 +513,11 @@ class Pipeline:
     def _update_data_fallback(self, post_result, filename: str) -> None:
         """
         [FIX BUG-3] Lưu partial data khi post-call không thành công (ok=False).
-        Chỉ lưu new_terms + skill_updates — an toàn vì không cần xác thực context.
-        Bỏ qua new_characters để tránh lưu nhân vật sai do thiếu thông tin.
+        Lưu terms + skills + characters (force_staging=True → bypass merge Active,
+        chỉ ghi Characters_Staging.json để user merge thủ công sau).
         """
         saved_anything = False
- 
+
         try:
             term_objects = _parse_list(post_result.new_terms, TermDetail, "TermDetail[fallback]")
             if term_objects:
@@ -519,8 +526,8 @@ class Pipeline:
                     print(f"  📝 [Fallback] Thuật ngữ mới: {n} (post-call lỗi)")
                     saved_anything = True
         except Exception as e:
-            logging.warning(f"[Pipeline/fallback] terms {filename}: {e}")
- 
+            logging.exception(f"[Pipeline/fallback] terms {filename}: {e}")
+
         try:
             skill_objects = _parse_list(post_result.skill_updates, SkillUpdate, "SkillUpdate[fallback]")
             if skill_objects:
@@ -529,12 +536,25 @@ class Pipeline:
                     print(f"  ⚔️  [Fallback] Kỹ năng mới: {n} (post-call lỗi)")
                     saved_anything = True
         except Exception as e:
-            logging.warning(f"[Pipeline/fallback] skills {filename}: {e}")
- 
+            logging.exception(f"[Pipeline/fallback] skills {filename}: {e}")
+
+        try:
+            char_objects = _parse_characters(post_result.new_characters)
+            if char_objects:
+                n_chars, _ = update_from_response(
+                    char_objects, [], filename,
+                    chapter_index=-1, force_staging=True,
+                )
+                if n_chars:
+                    print(f"  👤 [Fallback] Nhân vật mới (Staging): {n_chars} (post-call lỗi, cần merge thủ công)")
+                    saved_anything = True
+        except Exception as e:
+            logging.exception(f"[Pipeline/fallback] characters {filename}: {e}")
+
         if not saved_anything:
             print(f"  ⚠️  [Fallback] Post-call lỗi, không có data để lưu từ {filename}")
         else:
-            print(f"  ✅ [Fallback] Đã lưu partial data từ {filename} (nhân vật cần merge thủ công)")
+            print(f"  ✅ [Fallback] Đã lưu partial data từ {filename}")
 
 
     # ── Helpers ───────────────────────────────────────────────────
@@ -650,7 +670,7 @@ class Pipeline:
             else f"{settings.budget_limit:,} token"
         )
         print(f"\n{'═'*62}")
-        print(f"  Pipeline Dịch Truyện v5.4 — Trans: {translation_model_info()}")
+        print(f"  Pipeline Dịch Truyện v5.7 — Trans: {translation_model_info()}")
         if settings.novel_name:
             print(f"  Novel            : {settings.novel_name}")
             print(f"  Input            : {settings.active_input_dir}")

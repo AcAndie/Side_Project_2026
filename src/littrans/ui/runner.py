@@ -1,9 +1,5 @@
 """
 src/littrans/ui/runner.py — Background pipeline runner.
-
-[FIX] char_action default đổi từ "merge" → "".
-      Nếu mode="clean_chars" mà không truyền char_action → raise rõ ràng,
-      tránh âm thầm luôn merge dù UI chọn action khác.
 """
 from __future__ import annotations
 
@@ -112,12 +108,10 @@ def run_background(
                 clean_glossary()
 
             elif mode == "clean_chars":
-                # [FIX] Fail fast nếu action không được chỉ định
-                action = char_action or "merge"
                 if not char_action:
-                    print("⚠️  char_action không được truyền vào → dùng default 'merge'.")
+                    raise ValueError("clean_chars: char_action là bắt buộc (review|merge|fix|export|validate|archive|log|diff)")
                 from littrans.cli.tool_clean_chars import run_action
-                run_action(action)
+                run_action(char_action)
 
             else:
                 raise ValueError(f"mode không hợp lệ: '{mode}'")
@@ -135,6 +129,11 @@ def run_background(
             log_queue.put("__DONE__")
 
     thread = threading.Thread(target=_worker, daemon=True)
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx
+        add_script_run_ctx(thread)
+    except ImportError:
+        pass
     thread.start()
     return thread
 
@@ -173,13 +172,21 @@ class ScrapeRunner:
         import asyncio
         import traceback
 
+        # Windows: Playwright subprocess needs ProactorEventLoop
+        if sys.platform == "win32":
+            try:
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            except Exception:
+                pass
+
         try:
             from littrans.modules.scraper import run_scraper
             result = asyncio.run(run_scraper(urls, options, progress_queue))
             self._result_holder.append(result)
         except Exception as exc:
-            progress_queue.put(f"❌ Lỗi nghiêm trọng: {exc}")
-            for line in traceback.format_exc().splitlines()[-5:]:
+            progress_queue.put(f"__ERROR__:{type(exc).__name__}: {exc}")
+            progress_queue.put(f"❌ Lỗi nghiêm trọng: {type(exc).__name__}: {exc}")
+            for line in traceback.format_exc().splitlines()[-8:]:
                 if line.strip():
                     progress_queue.put(f"   {line}")
         finally:
@@ -248,6 +255,12 @@ class PipelineRunner:
                 pass
 
         import sys
+        # Windows: Playwright subprocess needs ProactorEventLoop
+        if sys.platform == "win32":
+            try:
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            except Exception:
+                pass
         old_stdout = sys.stdout
         sys.stdout = _Cap()
         try:

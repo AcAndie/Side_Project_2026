@@ -28,9 +28,6 @@ from littrans.core.patterns import word_boundary_pattern
 
 # ── Build table ───────────────────────────────────────────────────
 
-# src/littrans/context/name_lock.py
-# Thay thế toàn bộ hàm build_name_lock_table() và thêm _extract_from_bible()
-
 def build_name_lock_table() -> dict[str, str]:
     """Trả về {english_name: canonical_vn_name}."""
     table: dict[str, str] = {}
@@ -78,7 +75,8 @@ def _extract_from_bible(table: dict[str, str]) -> None:
                         _lock(table, alias_en, alias_vn)
 
     except Exception as e:
-        logging.warning(f"[NameLock] _extract_from_bible lỗi: {e}")
+        logging.exception(f"[NameLock] _extract_from_bible lỗi: {e}")
+        print(f"  ⚠ [Bible augment name_lock] {e}", flush=True)
 
 
 def _extract_from_characters(table: dict[str, str]) -> None:

@@ -29,13 +29,7 @@ def render_epub_tab(S: Any) -> None:
         "sẵn sàng cho pipeline dịch."
     )
 
-    for key, default in [
-        ("epub_running", False),
-        ("epub_q",       None),
-        ("epub_logs",    []),
-    ]:
-        if key not in S:
-            S[key] = default
+    # ep_* job state initialized via init_all_jobs(app.py)
 
     # Kiểm tra deps
     try:
@@ -118,22 +112,29 @@ def _tab_upload(S: Any, settings) -> None:
         st.caption(f"  ... và {len(epub_files)-10} file khác")
 
     col_btn, col_info = st.columns([1, 3])
-    if not S.epub_running:
+
+    ep_alive = S.ep_running and S.ep_thread is not None and \
+               getattr(S.ep_thread, "is_alive", lambda: False)()
+
+    if not ep_alive:
         if col_btn.button("▶ Bắt đầu xử lý", type="primary"):
-            S.epub_logs = []
-            S.epub_q    = queue.Queue()
-            _launch(S.epub_q, output_mode=S.get("epub_output_mode", "per_chapter"))
-            S.epub_running = True
+            from littrans.ui.core.state import reset_job
+            reset_job(S, "ep")
+            S.ep_logs = []
+            S.ep_q    = queue.Queue()
+            S.ep_thread = _launch(S.ep_q, output_mode=S.get("epub_output_mode", "per_chapter"))
+            S.ep_running  = True
+            S.ep_last_log = time.time()
             st.rerun()
     else:
         col_btn.button("⏳ Đang xử lý…", disabled=True)
-        col_info.warning("🔄 Đang xử lý — có thể mất vài phút. Đừng đóng cửa sổ.")
+        col_info.warning("🔄 Đang xử lý — có thể mất vài phút. (Có thể chuyển tab khác)")
 
-    if S.epub_running or S.epub_logs:
+    if S.ep_running or S.ep_logs:
         _handle_log(S)
 
 
-def _launch(log_queue: queue.Queue, output_mode: str = "per_chapter") -> None:
+def _launch(log_queue: queue.Queue, output_mode: str = "per_chapter"):
     """
     Launch epub processor in background thread.
 
@@ -179,26 +180,15 @@ def _launch(log_queue: queue.Queue, output_mode: str = "per_chapter") -> None:
     except ImportError:
         pass
     th.start()
+    return th
 
 
 def _handle_log(S: Any) -> None:
+    """Render only — drain handled by app.py poll_all."""
     import streamlit as st
-    from littrans.ui.runner import poll_queue
-
-    if S.epub_running:
-        done, _ = poll_queue(S.epub_q, S.epub_logs)
-        if done:
-            S.epub_running = False
-            S.epub_logs.append("─" * 56)
-            S.epub_logs.append("✅ Hoàn tất! Sang tab **Kết quả** để xem chapters.")
-
-    if S.epub_logs:
-        with st.expander("📋 Nhật ký xử lý", expanded=S.epub_running):
-            st.code("\n".join(S.epub_logs[-300:]), language=None)
-
-    if S.epub_running:
-        time.sleep(1.0)
-        st.rerun()
+    if S.ep_logs:
+        with st.expander("📋 Nhật ký xử lý", expanded=bool(S.ep_running)):
+            st.code("\n".join(S.ep_logs[-300:]), language=None)
 
 
 # ═══════════════════════════════════════════════════════════════════

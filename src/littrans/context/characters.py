@@ -383,7 +383,12 @@ def update_from_response(
     rel_updates   : list[RelationshipUpdate],
     source_chapter: str,
     chapter_index : int = 0,
+    force_staging : bool = False,
 ) -> tuple[int, int]:
+    """
+    force_staging=True → bypass immediate-merge (kể cả settings.immediate_merge).
+    Dùng cho fallback path khi post-call fail: dữ liệu chưa đáng tin → chỉ ghi Staging.
+    """
     if not new_chars and not rel_updates:
         return 0, 0
 
@@ -394,6 +399,7 @@ def update_from_response(
         stg_chars   = stg_data.setdefault("characters", {})
         chars_added = rels_updated = 0
         stg_dirty   = False
+        merge_to_active = settings.immediate_merge and not force_staging
 
         for char in new_chars:
             name = char.name.strip()
@@ -414,7 +420,7 @@ def update_from_response(
                 char.role = "NPC"
 
             profile = _build_profile(char, source_chapter, chapter_index)
-            if settings.immediate_merge:
+            if merge_to_active:
                 chars[name] = profile
             else:
                 stg_chars[name] = profile
@@ -436,7 +442,7 @@ def update_from_response(
                     )
             rels_updated += 1
 
-        if settings.immediate_merge and (chars_added or rels_updated):
+        if merge_to_active and (chars_added or rels_updated):
             active_data["meta"]["last_updated_chapter"] = source_chapter
             save_json(settings.characters_active_file, active_data)
         if stg_dirty:
@@ -484,6 +490,35 @@ def sync_staging_to_active() -> tuple[int, int]:
 def has_staging_chars() -> int:
     d = load_json(settings.staging_chars_file)
     return len(d.get("characters", {})) if d else 0
+
+
+def delete_character(name: str) -> bool:
+    """Xóa nhân vật khỏi Active / Staging / Archive (mọi tier có entry)."""
+    if not name:
+        return False
+    removed = False
+    try:
+        with _mlock:
+            with _lock:
+                for path_prop in (
+                    settings.characters_active_file,
+                    settings.characters_archive_file,
+                    settings.staging_chars_file,
+                ):
+                    data = load_json(path_prop)
+                    if not data:
+                        continue
+                    chars = data.get("characters", {})
+                    if name in chars:
+                        del chars[name]
+                        save_json(path_prop, data)
+                        removed = True
+    finally:
+        global _char_active_cache, _char_archive_cache
+        with _char_cache_lock:
+            _char_active_cache  = None
+            _char_archive_cache = None
+    return removed
 
 
 def character_stats() -> dict[str, int]:
