@@ -1,49 +1,71 @@
 # ── Secrets ──────────────────────────────────────────────────────
 # KHÔNG BAO GIỜ commit .env vào git
 .env
+.env.local
+.env.*.local
 
-# ── User data ─────────────────────────────────────────────────────
-# Mount làm bind volumes khi chạy — không cần trong repo
-inputs/
-outputs/
-data/
-logs/
-progress/
-issues.md
-
-# ── Bible System runtime files ────────────────────────────────────
-# Lock file tạo ra khi consolidation đang chạy
-.consolidate.lock
-
-# Backup files từ data_versioning.py (prune tự động giữ 3 bản)
-*.bak.*
-*.bak
-
-# ── Python artifacts ──────────────────────────────────────────────
+# ── Python ───────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
-*.pyo
+*$py.class
+*.so
+.Python
+*.egg
 *.egg-info/
-*.egg/
-dist/
 build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+MANIFEST
+.installed.cfg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ── Virtual envs ─────────────────────────────────────────────────
 .venv/
 venv/
+ENV/
+env/
+
+# ── Tooling caches ───────────────────────────────────────────────
+.mypy_cache/
+.ruff_cache/
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.log
 
-# ── Backup files chung ────────────────────────────────────────────
-*.bak*
-*.tmp
-
-# ── VCS & IDE ─────────────────────────────────────────────────────
-.git/
-.gitignore
+# ── IDE ──────────────────────────────────────────────────────────
 .vscode/
 .idea/
-*.DS_Store
+*.swp
+*.swo
+.DS_Store
 Thumbs.db
-.claude/
 
-# ── Docs ──────────────────────────────────────────────────────────
-CHANGELOG.md
-LICENSE
+# ── Project data (gitignored) ────────────────────────────────────
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# ── Cache files ──────────────────────────────────────────────────
+*.pkl
+*.pickle
+
+# ── Reference folders (local only) ───────────────────────────────
+Quick Translator/
