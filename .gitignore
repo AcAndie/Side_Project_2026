@@ -69,3 +69,9 @@ data/
 
 # ── Reference folders (local only) ───────────────────────────────
 Quick Translator/
+
+# ── Binary user data ─────────────────────────────────────────────
+*.epub
+
+# ── Claude Code project config (personal, not shared) ────────────
+.claude/

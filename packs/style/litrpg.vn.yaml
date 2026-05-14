@@ -1,0 +1,213 @@
+name: "LitRPG — Vietnamese"
+description: >
+  Style pack cho dịch LitRPG / GameLit sang tiếng Việt.
+  Giữ nguyên format token game ([Skill], [Stat], <System>, +EXP, HP/MP).
+  KHÔNG ép Hán-Việt — LitRPG nguồn EN dùng từ Việt phổ thông + thuật ngữ game tiếng Anh giữ nguyên một số.
+version: 1
+source_langs: [en, zh]
+target_lang: vn
+genre: litrpg
+
+vocabulary_rules:
+  prefer_han_viet: false
+  examples:
+    - {en: "Skill",       vn: "Kỹ năng"}
+    - {en: "Stat",        vn: "Chỉ số"}
+    - {en: "Mana",        vn: "Mana"}
+    - {en: "Mana Points", vn: "MP"}
+    - {en: "Health",      vn: "Máu"}
+    - {en: "Health Points", vn: "HP"}
+    - {en: "Stamina",     vn: "Thể lực"}
+    - {en: "Experience",  vn: "Kinh nghiệm"}
+    - {en: "Level",       vn: "Cấp"}
+    - {en: "Level up",    vn: "Lên cấp"}
+    - {en: "Quest",       vn: "Nhiệm vụ"}
+    - {en: "Dungeon",     vn: "Hầm ngục"}
+    - {en: "Boss",        vn: "Boss",       avoid: "trùm cuối"}
+    - {en: "Raid",        vn: "Raid",       avoid: "đột kích"}
+    - {en: "Party",       vn: "Tổ đội"}
+    - {en: "Guild",       vn: "Bang hội"}
+    - {en: "Faction",     vn: "Phe"}
+    - {en: "NPC",         vn: "NPC"}
+    - {en: "Player",      vn: "Người chơi"}
+    - {en: "System",      vn: "Hệ thống"}
+    - {en: "Status Window", vn: "Bảng trạng thái"}
+    - {en: "Inventory",   vn: "Túi đồ"}
+    - {en: "Equipment",   vn: "Trang bị"}
+    - {en: "Weapon",      vn: "Vũ khí"}
+    - {en: "Armor",       vn: "Giáp"}
+    - {en: "Potion",      vn: "Bình thuốc"}
+    - {en: "Buff",        vn: "Buff"}
+    - {en: "Debuff",      vn: "Debuff"}
+    - {en: "Cooldown",    vn: "Thời gian hồi"}
+    - {en: "Crit",        vn: "Chí mạng"}
+    - {en: "DPS",         vn: "DPS"}
+    - {en: "Tank",        vn: "Tank"}
+    - {en: "Healer",      vn: "Healer"}
+    - {en: "Aggro",       vn: "Aggro"}
+    - {en: "Loot",        vn: "Chiến lợi phẩm"}
+    - {en: "Drop rate",   vn: "Tỉ lệ rơi đồ"}
+    - {en: "Rare",        vn: "Hiếm"}
+    - {en: "Legendary",   vn: "Huyền thoại"}
+    - {en: "Epic",        vn: "Sử thi"}
+    - {en: "Common",      vn: "Thường"}
+
+stat_keywords:
+  - "STR (Strength → Sức mạnh)"
+  - "DEX (Dexterity → Nhanh nhẹn)"
+  - "INT (Intelligence → Trí tuệ)"
+  - "VIT (Vitality → Sinh lực)"
+  - "WIS (Wisdom → Khôn ngoan)"
+  - "AGI (Agility → Tốc độ)"
+  - "LUK (Luck → May mắn)"
+  - "CHA (Charisma → Sức cuốn hút)"
+
+rarity_ladder:
+  - {en: "Trash",     vn: "Rác"}
+  - {en: "Common",    vn: "Thường"}
+  - {en: "Uncommon",  vn: "Khác thường"}
+  - {en: "Rare",      vn: "Hiếm"}
+  - {en: "Epic",      vn: "Sử thi"}
+  - {en: "Legendary", vn: "Huyền thoại"}
+  - {en: "Mythic",    vn: "Thần thoại"}
+  - {en: "Divine",    vn: "Thần"}
+
+game_tokens_preserved:
+  # Các pattern này PHẢI giữ nguyên ký tự, KHÔNG được "Việt hóa"
+  - "[Skill]"
+  - "[Skill Name]"
+  - "[Stat]"
+  - "[Quest]"
+  - "[Item]"
+  - "[Level Up!]"
+  - "[Class Up!]"
+  - "[Boss]"
+  - "[Achievement Unlocked]"
+  - "[System Notification]"
+  - "<System>"
+  - "</System>"
+  - "+50 EXP"
+  - "+1 STR"
+  - "-20 HP"
+  - "HP: 100/100"
+  - "MP: 50/100"
+
+honorifics:
+  - {en: "Sir",     vn: "ngài"}
+  - {en: "Lady",    vn: "tiểu thư"}
+  - {en: "Master",  vn: "sư phụ", use_when: "khi gọi mentor trong context fantasy"}
+  - {en: "Lord",    vn: "lãnh chúa"}
+  - {en: "Princess", vn: "công chúa"}
+  - {en: "King",    vn: "vua"}
+  - {en: "Queen",   vn: "nữ hoàng"}
+
+banned_phrases:
+  - "một cách"
+  - "đang được"
+  - "có khả năng để"
+  - "tại điểm này"
+  - "trong khi đó thì"
+  - "với mục đích"
+  - "việc mà"
+  - "có thể nói rằng"
+  - "không thể không"
+  - "thanh kiếm phép thuật"   # → kiếm phép / vũ khí phép
+  - "thuốc viên"              # → bình thuốc
+  - "ma cà rồng"              # → ma cà rồng OK trong urban fantasy nhưng tránh trong tu tiên
+  - "phù thủy"                # tùy ngữ cảnh
+
+preferred_phrases:
+  - {preferred: "Hệ thống",       avoid: "Hệ thống tâm linh"}
+  - {preferred: "Bảng trạng thái", avoid: "Cửa sổ tình trạng"}
+  - {preferred: "Lên cấp",        avoid: "tiến hoá cấp độ"}
+  - {preferred: "Boss",           avoid: "trùm cuối kẻ thù"}
+  - {preferred: "Buff",           avoid: "phép gia tăng"}
+  - {preferred: "Debuff",         avoid: "phép suy giảm"}
+  - {preferred: "Tổ đội",         avoid: "đội chơi"}
+  - {preferred: "Bang hội",       avoid: "liên minh người chơi"}
+
+tone_directives:
+  register: "hiện đại, năng động, có chút game-y"
+  narrator_voice: "ngôi thứ nhất hoặc thứ ba cận, casual"
+  dialogue_style: |
+    Đối thoại LitRPG ngắn gọn, có thể chèn slang gamer (gg, op, nerf).
+    Hệ thống message thường lạnh lùng, mechanical: "[Bạn đã đạt cấp 10]".
+    NPC tùy faction — guard nói trang trọng, thợ rèn nói thô.
+  pacing: "câu ngắn cho combat, câu dài cho lore"
+  punctuation:
+    use_em_dash: true
+    use_ellipsis: true
+    avoid_exclamation_overuse: false  # LitRPG cho phép nhiều !
+
+few_shot_examples:
+  - id: example_01_system_notification
+    source: |
+      [System Notification]
+      You have leveled up! Level 5 → Level 6.
+      +5 STR, +3 INT, +10 HP.
+      New skill acquired: [Fireball Lv.1].
+    target: |
+      [Thông báo Hệ thống]
+      Bạn đã lên cấp! Cấp 5 → Cấp 6.
+      +5 STR, +3 INT, +10 HP.
+      Đã học kỹ năng mới: [Fireball Lv.1].
+    notes: "Giữ nguyên [Fireball Lv.1] và stat token. 'Skill acquired' → 'Đã học kỹ năng'."
+
+  - id: example_02_combat
+    source: |
+      The goblin lunged at me, but I sidestepped and slashed.
+      "Critical hit!" the System chimed. -45 HP.
+      The goblin collapsed, dropping a [Rusty Dagger].
+    target: |
+      Tên goblin lao vào tôi, nhưng tôi né sang một bên và chém ngược lại.
+      "Chí mạng!" Hệ thống vang lên. -45 HP.
+      Goblin gục xuống, rơi ra một [Rusty Dagger].
+    notes: "Giữ item name [Rusty Dagger] nguyên gốc EN — tên đồ chuẩn LitRPG. 'Critical hit' → 'Chí mạng'."
+
+  - id: example_03_quest_dialogue
+    source: |
+      "Adventurer," the old guard said, "the goblin chief has been raiding our village for weeks.
+      Slay him and bring back his head. I'll reward you with 500 gold and a [Veteran's Sword]."
+    target: |
+      "Nhà thám hiểm," lão lính canh nói, "tên thủ lĩnh goblin đã cướp phá làng chúng ta nhiều tuần rồi.
+      Hãy giết hắn và mang đầu hắn về. Ta sẽ thưởng cho ngươi 500 vàng và một [Veteran's Sword]."
+    notes: "Đại từ 'ngươi/ta' phù hợp NPC fantasy. Item name giữ EN. 'Adventurer' → 'Nhà thám hiểm'."
+
+  - id: example_04_status_window
+    source: |
+      [Status]
+      Name: Alex Chen
+      Class: Mage
+      Level: 12
+      HP: 80/120
+      MP: 200/200
+      Skills: [Fireball Lv.3], [Ice Spike Lv.2], [Mana Shield Lv.1]
+    target: |
+      [Trạng thái]
+      Tên: Alex Chen
+      Lớp: Pháp sư
+      Cấp: 12
+      HP: 80/120
+      MP: 200/200
+      Kỹ năng: [Fireball Lv.3], [Ice Spike Lv.2], [Mana Shield Lv.1]
+    notes: "Bảng status: dịch label (Tên/Lớp/Cấp), giữ value (số, item name) nguyên gốc."
+
+  - id: example_05_internal_thought
+    source: |
+      Damn it. Three of them. I had maybe enough mana for one more Fireball,
+      then I'd be tapped. Tank up and hope my guildmates respawn in time.
+    target: |
+      Chết tiệt. Ba con cơ à. Mana còn đủ thêm một Fireball nữa thôi,
+      sau đó là cạn. Đành tank và hy vọng đồng đội guild kịp hồi sinh.
+    notes: "Slang gamer giữ được: tank, mana, Fireball. Câu ngắn, casual."
+
+quality_checks:
+  required_keep:
+    - "Game tokens trong dấu [] và <> phải giữ nguyên ký tự"
+    - "Số liệu (HP/MP/EXP/STR/…) không dịch"
+    - "Tên item/skill PROPER NOUN không Việt hoá (Fireball giữ nguyên, không 'Cầu lửa')"
+  forbidden_in_output:
+    - "một cách"
+    - "đang được"
+    - "thanh kiếm phép thuật"
+  max_translationese_ratio: 0.03

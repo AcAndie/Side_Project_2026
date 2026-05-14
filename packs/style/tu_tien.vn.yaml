@@ -1,0 +1,223 @@
+name: "Tu Tiên — Vietnamese"
+description: >
+  Style pack cho dịch tiểu thuyết tu tiên (xianxia) Trung Quốc sang tiếng Việt.
+  Ưu tiên Hán-Việt cho thuật ngữ, giữ register "tu chân" cổ điển, tránh
+  "translationese" của Google Translate.
+version: 1
+source_langs: [zh]
+target_lang: vn
+genre: tu_tien
+
+vocabulary_rules:
+  prefer_han_viet: true
+  examples:
+    - {zh: "修为",     vn: "tu vi",         avoid: "khả năng tu luyện"}
+    - {zh: "境界",     vn: "cảnh giới",     avoid: "trình độ tâm linh"}
+    - {zh: "突破",     vn: "đột phá",       avoid: "vượt qua giới hạn"}
+    - {zh: "灵气",     vn: "linh khí",      avoid: "năng lượng tâm linh"}
+    - {zh: "灵根",     vn: "linh căn",      avoid: "tiềm năng tu luyện"}
+    - {zh: "法宝",     vn: "pháp bảo",      avoid: "vật phẩm phép thuật"}
+    - {zh: "功法",     vn: "công pháp",     avoid: "kỹ thuật tu luyện"}
+    - {zh: "心法",     vn: "tâm pháp",      avoid: "phương pháp tinh thần"}
+    - {zh: "剑诀",     vn: "kiếm quyết",    avoid: "bí kíp kiếm thuật"}
+    - {zh: "剑气",     vn: "kiếm khí",      avoid: "năng lượng kiếm"}
+    - {zh: "丹药",     vn: "đan dược",      avoid: "thuốc viên"}
+    - {zh: "丹方",     vn: "đan phương",    avoid: "công thức thuốc"}
+    - {zh: "炼丹",     vn: "luyện đan",     avoid: "chế tạo thuốc"}
+    - {zh: "炼器",     vn: "luyện khí",     avoid: "rèn vũ khí phép thuật"}
+    - {zh: "真元",     vn: "chân nguyên",   avoid: "năng lượng nội tại"}
+    - {zh: "元神",     vn: "nguyên thần",   avoid: "linh hồn gốc"}
+    - {zh: "神识",     vn: "thần thức",     avoid: "ý thức tâm linh"}
+    - {zh: "天劫",     vn: "thiên kiếp",    avoid: "thử thách của trời"}
+    - {zh: "渡劫",     vn: "độ kiếp",       avoid: "vượt qua thử thách"}
+    - {zh: "飞升",     vn: "phi thăng",     avoid: "bay lên trời"}
+    - {zh: "大道",     vn: "đại đạo",       avoid: "con đường lớn"}
+    - {zh: "悟道",     vn: "ngộ đạo",       avoid: "giác ngộ chân lý"}
+    - {zh: "传承",     vn: "truyền thừa",   avoid: "kế thừa"}
+    - {zh: "宗门",     vn: "tông môn",      avoid: "trường phái"}
+    - {zh: "门派",     vn: "môn phái",      avoid: "tổ chức"}
+    - {zh: "弟子",     vn: "đệ tử",         avoid: "học trò"}
+    - {zh: "长老",     vn: "trưởng lão",    avoid: "người lớn tuổi"}
+    - {zh: "魔道",     vn: "ma đạo",        avoid: "con đường tà"}
+    - {zh: "正道",     vn: "chính đạo",     avoid: "con đường thiện"}
+
+realm_ladder:
+  - {zh: "练气", vn: "Luyện Khí",  rank: 1, notes: "9 tầng — Luyện Khí sơ kỳ → cửu tầng"}
+  - {zh: "筑基", vn: "Trúc Cơ",    rank: 2, notes: "sơ kỳ / trung kỳ / hậu kỳ / đại viên mãn"}
+  - {zh: "金丹", vn: "Kim Đan",    rank: 3, notes: "9 phẩm — nhất phẩm tới cửu phẩm kim đan"}
+  - {zh: "元婴", vn: "Nguyên Anh", rank: 4, notes: "kết hồn — chân thân chia tách"}
+  - {zh: "化神", vn: "Hóa Thần",   rank: 5, notes: "thần thức bao phủ thiên địa"}
+  - {zh: "炼虚", vn: "Luyện Hư",   rank: 6, notes: "ngộ luật pháp tắc"}
+  - {zh: "合体", vn: "Hợp Thể",    rank: 7, notes: "hợp nhất pháp tắc"}
+  - {zh: "大乘", vn: "Đại Thừa",   rank: 8, notes: "đại viên mãn trước kiếp"}
+  - {zh: "渡劫", vn: "Độ Kiếp",    rank: 9, notes: "vượt thiên kiếp → phi thăng"}
+
+stage_modifiers:
+  - {zh: "初期",     vn: "sơ kỳ"}
+  - {zh: "中期",     vn: "trung kỳ"}
+  - {zh: "后期",     vn: "hậu kỳ"}
+  - {zh: "巅峰",     vn: "đỉnh phong"}
+  - {zh: "圆满",     vn: "viên mãn"}
+  - {zh: "大圆满",   vn: "đại viên mãn"}
+
+honorifics:
+  - {zh: "道友",   vn: "đạo hữu",     use_when: "ngang vai, lịch sự giữa các tu sĩ"}
+  - {zh: "前辈",   vn: "tiền bối",    use_when: "kính cẩn với người trên"}
+  - {zh: "晚辈",   vn: "vãn bối",     use_when: "tự xưng khiêm tốn"}
+  - {zh: "师父",   vn: "sư phụ",      use_when: "với thầy"}
+  - {zh: "师尊",   vn: "sư tôn",      use_when: "tôn xưng thầy trong tông môn"}
+  - {zh: "师兄",   vn: "sư huynh",    use_when: "sư huynh đồng môn"}
+  - {zh: "师姐",   vn: "sư tỷ",       use_when: "sư tỷ đồng môn"}
+  - {zh: "师弟",   vn: "sư đệ",       use_when: "sư đệ đồng môn"}
+  - {zh: "师妹",   vn: "sư muội",     use_when: "sư muội đồng môn"}
+  - {zh: "掌门",   vn: "chưởng môn",  use_when: "người đứng đầu tông phái"}
+  - {zh: "宗主",   vn: "tông chủ",    use_when: "người sáng lập / đứng đầu tông"}
+  - {zh: "教主",   vn: "giáo chủ",    use_when: "đứng đầu giáo phái"}
+  - {zh: "魔尊",   vn: "ma tôn",      use_when: "tôn xưng cao nhân ma đạo"}
+  - {zh: "仙尊",   vn: "tiên tôn",    use_when: "tôn xưng tiên nhân"}
+  - {zh: "上仙",   vn: "thượng tiên", use_when: "tiên cấp cao"}
+  - {zh: "圣人",   vn: "thánh nhân",  use_when: "cảnh giới thánh"}
+
+sect_suffixes:
+  - "tông"
+  - "phái"
+  - "môn"
+  - "các"
+  - "lâu"
+  - "trang"
+  - "sơn trang"
+  - "cốc"
+  - "thành"
+  - "đảo"
+  - "viện"
+  - "đường"
+
+place_suffixes:
+  - "sơn"      # 山
+  - "cốc"      # 谷
+  - "động"     # 洞
+  - "đỉnh"     # 峰
+  - "trận"     # 阵
+  - "địa"      # 地
+  - "vực"      # 域
+  - "giới"     # 界
+
+banned_phrases:
+  # Translationese điển hình của Google Translate / AI dịch máy thô
+  - "một cách"
+  - "đang được"
+  - "vẻ đẹp của"
+  - "có vẻ như"
+  - "có thể nói rằng"
+  - "không thể không"
+  - "trong khi đó thì"
+  - "với mục đích"
+  - "việc mà"
+  - "tại thời điểm này"
+  - "phép thuật"        # dùng "pháp thuật" thay
+  - "ma thuật"          # dùng "tà thuật" / "ma đạo"
+  - "phù thủy"          # dùng "yêu nhân" / "ma tu"
+  - "ma cà rồng"        # genre lệch
+  - "siêu phàm"         # dùng "phi phàm"
+  - "năng lượng tâm linh"
+  - "linh hồn gốc"      # → nguyên thần
+  - "thuốc viên"        # → đan dược
+  - "người khổng lồ"    # → cự nhân
+  - "thanh kiếm phép thuật"  # → kiếm pháp bảo
+
+preferred_phrases:
+  - {preferred: "linh khí",      avoid: "năng lượng tâm linh"}
+  - {preferred: "pháp bảo",      avoid: "vật phẩm phép thuật"}
+  - {preferred: "công pháp",     avoid: "kỹ thuật tu luyện"}
+  - {preferred: "đan dược",      avoid: "thuốc viên"}
+  - {preferred: "thiên địa",     avoid: "trời và đất"}
+  - {preferred: "thần thức",     avoid: "ý thức tâm linh"}
+  - {preferred: "kiếm ý",        avoid: "ý chí của thanh kiếm"}
+  - {preferred: "đạo tâm",       avoid: "tâm hồn đạo lý"}
+  - {preferred: "tu sĩ",         avoid: "người tu hành"}
+  - {preferred: "yêu thú",       avoid: "quái vật"}
+  - {preferred: "linh thú",      avoid: "thú cưng tâm linh"}
+  - {preferred: "linh thạch",    avoid: "đá năng lượng"}
+  - {preferred: "trận pháp",     avoid: "mê cung phép thuật"}
+  - {preferred: "nguyên anh",    avoid: "phôi thai linh hồn"}
+  - {preferred: "hồng trần",     avoid: "thế giới phàm tục"}
+
+tone_directives:
+  register: "cổ điển, trang trọng vừa phải"
+  narrator_voice: "ngôi thứ ba toàn tri, ngắn gọn, dứt khoát"
+  dialogue_style: |
+    Đối thoại tu sĩ thường ngắn, cô đọng, mang sắc thái khí phách.
+    Câu nói của tiền bối/ma tôn thường nặng, dùng đại từ "ngươi/ta".
+    Sư phụ với đệ tử có thể dịu hơn nhưng vẫn giữ uy nghi.
+  pacing: "câu ngắn cho hành động, câu dài cho miêu tả cảnh giới / luyện công"
+  punctuation:
+    use_em_dash: true       # —
+    use_ellipsis: true      # …
+    avoid_exclamation_overuse: true
+
+few_shot_examples:
+  - id: example_01_sect_entry
+    source: |
+      李青走进青云宗，心中既紧张又兴奋。
+      入门弟子的考核即将开始，他握紧了腰间的木剑。
+    target: |
+      Lý Thanh bước vào Thanh Vân tông, trong lòng vừa hồi hộp vừa hưng phấn.
+      Khảo hạch nhập môn đệ tử sắp bắt đầu, hắn nắm chặt thanh mộc kiếm bên hông.
+    notes: "Giữ tên Hán-Việt, dùng 'hắn' cho nam chính tu sĩ, 'thanh' lượng từ cho kiếm."
+
+  - id: example_02_breakthrough
+    source: |
+      他盘膝而坐，运转功法，灵气如潮水般涌入丹田。
+      那一刹那，金丹凝结，他终于突破到了金丹期。
+    target: |
+      Hắn ngồi xếp bằng, vận chuyển công pháp, linh khí như thủy triều cuồn cuộn dồn vào đan điền.
+      Khoảnh khắc ấy, kim đan ngưng kết, hắn rốt cuộc đã đột phá lên Kim Đan kỳ.
+    notes: "'Bàn膝而坐' = 'ngồi xếp bằng', không phải 'ngồi khoanh chân'. 'Khoảnh khắc' thay vì 'một khoảng thời gian'."
+
+  - id: example_03_combat
+    source: |
+      剑光一闪，杀机已至。
+      老者神色一凝，掐诀祭出一面青色法宝，与剑光硬撼在一起。
+    target: |
+      Kiếm quang lóe lên, sát cơ đã đến.
+      Lão giả thần sắc đông cứng, bấm quyết tế ra một mặt pháp bảo màu xanh, cùng kiếm quang cứng rắn va chạm vào nhau.
+    notes: "Giữ 'kiếm quang', 'sát cơ', 'tế ra' — đặc trưng tu tiên. Tránh 'tia sáng kiếm' hay 'phóng ra'."
+
+  - id: example_04_master_dialogue
+    source: |
+      "徒儿，你可知何为大道？"老者捋须而问。
+      李青恭敬答道："弟子愚钝，恳请师尊指点。"
+    target: |
+      "Đồ nhi, ngươi có biết thế nào là đại đạo?" Lão giả vuốt râu hỏi.
+      Lý Thanh cung kính đáp: "Đệ tử ngu muội, khẩn cầu sư tôn chỉ điểm."
+    notes: "Đại từ 'ngươi/ta', 'đồ nhi' giữ Hán-Việt. 'Vuốt râu' tự nhiên hơn 'sờ râu'."
+
+  - id: example_05_realm_description
+    source: |
+      元婴期修士，神识可覆盖方圆百里，
+      飞剑一念可破万军，已不是凡俗武者所能比拟。
+    target: |
+      Tu sĩ Nguyên Anh kỳ, thần thức có thể bao phủ phương viên trăm dặm,
+      phi kiếm một niệm có thể phá vạn quân, đã không phải võ giả phàm tục có thể sánh kịp.
+    notes: "'Phương viên' (方圆) giữ nguyên, 'phi kiếm' không dịch 'kiếm bay'. Cảnh giới luôn viết hoa."
+
+  - id: example_06_inner_monologue
+    source: |
+      李青心中暗叹，这老者修为深不可测，绝非普通筑基修士。
+      若是动手，自己恐怕连三招都接不下。
+    target: |
+      Lý Thanh trong lòng thầm than, lão giả này tu vi thâm bất khả trắc, tuyệt không phải tu sĩ Trúc Cơ bình thường.
+      Nếu động thủ, bản thân e rằng đến ba chiêu cũng tiếp không nổi.
+    notes: "'Thâm bất khả trắc' giữ nguyên — thành ngữ Hán-Việt phổ biến. 'Bản thân' cho ngôi thứ ba nội tâm."
+
+quality_checks:
+  required_keep:
+    - "Tên riêng phải giữ Hán-Việt nếu có trong glossary"
+    - "Cảnh giới phải viết hoa và đúng theo realm_ladder"
+    - "Đại từ nhất quán trong cùng nhân vật"
+  forbidden_in_output:
+    - "phép thuật"
+    - "ma thuật"
+    - "siêu phàm"
+    - "thuốc viên"
+  max_translationese_ratio: 0.02   # < 2% câu chứa banned_phrases

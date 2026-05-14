@@ -1,0 +1,192 @@
+name: "Xianxia / Cultivation — English"
+description: >
+  Style pack for translating Chinese cultivation novels (xianxia / xuanhuan / wuxia)
+  into English. Follows the community convention popularized by Wuxiaworld /
+  Webnovel translators: pinyin for proper nouns + English for cultivation terms.
+version: 1
+source_langs: [zh]
+target_lang: en
+genre: tu_tien
+
+vocabulary_rules:
+  prefer_han_viet: false
+  examples:
+    - {zh: "修为",   en: "cultivation base",   avoid: "spiritual ability"}
+    - {zh: "修炼",   en: "cultivate",          avoid: "practice magic"}
+    - {zh: "境界",   en: "realm",              avoid: "tier"}
+    - {zh: "突破",   en: "break through",      avoid: "level up"}
+    - {zh: "灵气",   en: "spiritual energy",   avoid: "mana"}
+    - {zh: "灵根",   en: "spiritual root",     avoid: "talent"}
+    - {zh: "法宝",   en: "magic treasure",     avoid: "magical item"}
+    - {zh: "功法",   en: "cultivation art",    avoid: "magic technique"}
+    - {zh: "心法",   en: "mental cultivation method"}
+    - {zh: "剑诀",   en: "sword art",          avoid: "sword spell"}
+    - {zh: "剑气",   en: "sword qi",           avoid: "sword energy"}
+    - {zh: "丹药",   en: "elixir pill",        avoid: "potion"}
+    - {zh: "丹方",   en: "elixir recipe"}
+    - {zh: "炼丹",   en: "alchemy"}
+    - {zh: "炼器",   en: "artifact forging"}
+    - {zh: "真元",   en: "true essence",       avoid: "true energy"}
+    - {zh: "元神",   en: "primordial spirit",  avoid: "original soul"}
+    - {zh: "神识",   en: "spiritual sense",    avoid: "divine awareness"}
+    - {zh: "天劫",   en: "heavenly tribulation"}
+    - {zh: "渡劫",   en: "transcend the tribulation"}
+    - {zh: "飞升",   en: "ascend"}
+    - {zh: "大道",   en: "the Great Dao"}
+    - {zh: "悟道",   en: "enlightenment"}
+    - {zh: "传承",   en: "legacy / inheritance"}
+    - {zh: "宗门",   en: "Sect"}
+    - {zh: "门派",   en: "Sect"}
+    - {zh: "弟子",   en: "disciple"}
+    - {zh: "长老",   en: "Elder"}
+    - {zh: "魔道",   en: "Demonic Path"}
+    - {zh: "正道",   en: "Righteous Path"}
+    - {zh: "妖兽",   en: "demonic beast"}
+    - {zh: "灵兽",   en: "spirit beast"}
+    - {zh: "灵石",   en: "spirit stone"}
+    - {zh: "凡人",   en: "mortal"}
+
+realm_ladder:
+  - {zh: "练气", en: "Qi Refinement",         rank: 1, notes: "9 layers — Qi Refinement 1st layer → 9th layer"}
+  - {zh: "筑基", en: "Foundation Establishment", rank: 2}
+  - {zh: "金丹", en: "Golden Core",           rank: 3, notes: "9 grades — 1st-grade core to 9th-grade core"}
+  - {zh: "元婴", en: "Nascent Soul",          rank: 4}
+  - {zh: "化神", en: "Spirit Severing",       rank: 5, notes: "also rendered: Soul Transformation"}
+  - {zh: "炼虚", en: "Void Refinement",       rank: 6}
+  - {zh: "合体", en: "Body Integration",      rank: 7}
+  - {zh: "大乘", en: "Great Vehicle",         rank: 8, notes: "also: Mahayana"}
+  - {zh: "渡劫", en: "Tribulation Transcendence", rank: 9}
+
+stage_modifiers:
+  - {zh: "初期",   en: "early-stage"}
+  - {zh: "中期",   en: "mid-stage"}
+  - {zh: "后期",   en: "late-stage"}
+  - {zh: "巅峰",   en: "peak"}
+  - {zh: "圆满",   en: "perfected"}
+  - {zh: "大圆满", en: "great perfection"}
+
+honorifics:
+  - {zh: "道友",   en: "fellow Daoist",   use_when: "peer, polite"}
+  - {zh: "前辈",   en: "Senior",          use_when: "respectful, capitalised"}
+  - {zh: "晚辈",   en: "this junior",     use_when: "self-deprecating"}
+  - {zh: "师父",   en: "Master",          use_when: "to one's teacher"}
+  - {zh: "师尊",   en: "Honored Master"}
+  - {zh: "师兄",   en: "Senior Brother"}
+  - {zh: "师姐",   en: "Senior Sister"}
+  - {zh: "师弟",   en: "Junior Brother"}
+  - {zh: "师妹",   en: "Junior Sister"}
+  - {zh: "掌门",   en: "Sect Master"}
+  - {zh: "宗主",   en: "Sect Master / Ancestor"}
+  - {zh: "教主",   en: "Cult Leader"}
+  - {zh: "魔尊",   en: "Demon Lord"}
+  - {zh: "仙尊",   en: "Immortal Lord"}
+  - {zh: "上仙",   en: "High Immortal"}
+  - {zh: "圣人",   en: "Saint"}
+
+sect_suffixes:
+  - "Sect"
+  - "Clan"
+  - "Pavilion"
+  - "Tower"
+  - "Manor"
+  - "Mountain"
+  - "Valley"
+  - "City"
+  - "Hall"
+
+naming_conventions:
+  proper_nouns: "pinyin (e.g. 李青 → Li Qing, 青云宗 → Qingyun Sect)"
+  realm_terms: "English with capitalised proper-noun handling"
+  techniques: "title case (e.g. 青云剑诀 → Qingyun Sword Art)"
+
+banned_phrases:
+  - "Mr."
+  - "Mrs."
+  - "Doctor"
+  - "President"
+  - "magic spell"
+  - "wizard"
+  - "elf"
+  - "dragon ball"
+  - "level up"
+  - "spell book"
+
+preferred_phrases:
+  - {preferred: "spiritual energy", avoid: "mana"}
+  - {preferred: "magic treasure",   avoid: "magical item"}
+  - {preferred: "elixir pill",      avoid: "medicine pill"}
+  - {preferred: "Dao",              avoid: "the Way of Heaven"}
+  - {preferred: "Sect",             avoid: "school / faction"}
+  - {preferred: "Elder",            avoid: "senior member"}
+  - {preferred: "sword qi",         avoid: "sword aura"}
+
+tone_directives:
+  register: "formal, slightly archaic, like Wuxiaworld translations"
+  narrator_voice: "third-person limited, descriptive"
+  dialogue_style: |
+    Cultivators address each other formally. Use 'you' (not 'thou') but with
+    deliberate restraint. Demon Lords / Cult Leaders sound imperious; juniors
+    are humble. Sect dialogue rarely uses contractions in narration.
+  pacing: "tight in combat, expansive during cultivation breakthroughs"
+  punctuation:
+    use_em_dash: true
+    use_ellipsis: true
+    avoid_exclamation_overuse: true
+
+few_shot_examples:
+  - id: example_01_sect_entry
+    source: |
+      李青走进青云宗，心中既紧张又兴奋。
+      入门弟子的考核即将开始，他握紧了腰间的木剑。
+    target: |
+      Li Qing stepped into the Qingyun Sect, his heart torn between nerves and excitement.
+      The entrance disciple assessment was about to begin; he gripped the wooden sword at his waist.
+    notes: "Pinyin for names + 'Sect' for 宗. 'Step into' beats 'walked into' for cinematic feel."
+
+  - id: example_02_breakthrough
+    source: |
+      他盘膝而坐，运转功法，灵气如潮水般涌入丹田。
+      那一刹那，金丹凝结，他终于突破到了金丹期。
+    target: |
+      He sat cross-legged, circulating the cultivation art as spiritual energy surged into his dantian like a tide.
+      In that very instant, the Golden Core coalesced — he had at last broken through to the Golden Core realm.
+    notes: "'dantian' is left untranslated (xianxia standard). 'Golden Core' capitalised as a realm name."
+
+  - id: example_03_combat
+    source: |
+      剑光一闪，杀机已至。
+      老者神色一凝，掐诀祭出一面青色法宝，与剑光硬撼在一起。
+    target: |
+      A flash of sword light — the killing intent had arrived.
+      The old man's expression hardened. With a swift hand seal he summoned a green magic treasure, and it clashed head-on with the sword light.
+    notes: "Em-dash for cinematic break. 'killing intent' is the standard rendering of 杀机."
+
+  - id: example_04_master_dialogue
+    source: |
+      "徒儿，你可知何为大道？"老者捋须而问。
+      李青恭敬答道："弟子愚钝，恳请师尊指点。"
+    target: |
+      "Disciple, do you know what the Great Dao is?" the old man asked, stroking his beard.
+      Li Qing answered respectfully, "This disciple is dull-witted. I humbly ask Honored Master to enlighten me."
+    notes: "'This disciple' for 弟子 self-reference. 'Honored Master' for 师尊."
+
+  - id: example_05_realm_description
+    source: |
+      元婴期修士，神识可覆盖方圆百里，
+      飞剑一念可破万军，已不是凡俗武者所能比拟。
+    target: |
+      A Nascent Soul cultivator's spiritual sense could blanket a hundred li in every direction;
+      with but a thought their flying sword could shatter an army of ten thousand — far beyond what any mortal martial artist could compare to.
+    notes: "'li' (li = 0.5km) left untranslated. Capitalised realm name."
+
+quality_checks:
+  required_keep:
+    - "Proper nouns in pinyin (no anglicisation like 'Lee' for 李)"
+    - "Realm names capitalised consistently"
+    - "Honorifics from the table; never 'Mr.' / 'Doctor'"
+  forbidden_in_output:
+    - "Mr."
+    - "wizard"
+    - "level up"
+    - "mana"
+  max_translationese_ratio: 0.05

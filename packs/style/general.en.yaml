@@ -1,0 +1,117 @@
+name: "General Prose — English"
+description: >
+  Catch-all style pack for translating Vietnamese (or other) prose into
+  natural English. No genre-specific vocabulary; clean modern register.
+  Pick this when no specialised pack fits.
+version: 1
+source_langs: [vn, zh]
+target_lang: en
+genre: general
+
+vocabulary_rules:
+  prefer_han_viet: false
+  examples:
+    - {vn: "đại ca",        en: "elder brother", avoid: "big bro"}
+    - {vn: "tiểu thư",      en: "young lady"}
+    - {vn: "công tử",       en: "young master"}
+    - {vn: "phụ thân",      en: "father"}
+    - {vn: "mẫu thân",      en: "mother"}
+    - {vn: "huynh đệ",      en: "brothers"}
+    - {vn: "tỷ muội",       en: "sisters"}
+    - {vn: "đệ tử",         en: "disciple"}
+    - {vn: "sư phụ",        en: "Master"}
+    - {vn: "tiền bối",      en: "Senior"}
+    - {vn: "vãn bối",       en: "this junior"}
+    - {vn: "kỳ thực",       en: "in truth"}
+    - {vn: "hảo hảo",       en: "very well"}
+    - {vn: "đột nhiên",     en: "suddenly"}
+    - {vn: "bỗng nhiên",    en: "suddenly"}
+    - {vn: "tuy nhiên",     en: "however"}
+    - {vn: "do đó",         en: "therefore"}
+    - {vn: "vậy thì",       en: "in that case"}
+
+honorifics:
+  - {vn: "tiền bối",  en: "Senior"}
+  - {vn: "hậu bối",   en: "junior"}
+  - {vn: "đại nhân",  en: "Sir / Lord"}
+  - {vn: "phu nhân",  en: "Lady"}
+  - {vn: "công chúa", en: "Princess"}
+
+banned_phrases:
+  - "in a way that"
+  - "it could be said that"
+  - "it can be argued"
+  - "for the purpose of"
+  - "at this point in time"
+  - "the act of"
+  - "begun to begin"
+  - "ended up by"
+  # Vietnamese-leaking phrases that suggest unidiomatic translation:
+  - "một cách"
+  - "có thể nói rằng"
+
+preferred_phrases:
+  - {preferred: "Sect",              avoid: "school"}
+  - {preferred: "Master",            avoid: "teacher"}
+  - {preferred: "elder brother",     avoid: "big brother"}
+  - {preferred: "this junior",       avoid: "I (humble)"}
+  - {preferred: "Senior",            avoid: "elder one"}
+
+tone_directives:
+  register: "natural modern English, mildly literary"
+  narrator_voice: "third-person limited; first-person if source uses it"
+  dialogue_style: |
+    Dialogue contractions are fine ("I'm", "don't") in modern settings.
+    Avoid contractions in formal / period prose.
+    Keep Vietnamese honorifics translated, not transliterated.
+  pacing: "match source pacing; tighten run-on sentences if needed"
+  punctuation:
+    use_em_dash: true
+    use_ellipsis: true
+    avoid_exclamation_overuse: true
+
+few_shot_examples:
+  - id: example_01_dialogue
+    source: |
+      "Đại ca, anh đi đâu thế?" Tiểu Lý lo lắng hỏi.
+      "Không có gì," người kia đáp lạnh nhạt, "ngươi cứ lo việc của ngươi đi."
+    target: |
+      "Elder brother, where are you going?" Little Li asked anxiously.
+      "It's nothing," the other replied coldly. "Mind your own business."
+    notes: "Vietnamese 'đại ca' renders as 'elder brother'. Idiomatic 'mind your own business' replaces literal 'lo việc của ngươi'."
+
+  - id: example_02_descriptive
+    source: |
+      Trời đã ngả về chiều, ánh nắng chiếu xiên qua hàng dừa,
+      đổ những vệt vàng cam dài trên mặt nước phẳng lặng.
+    target: |
+      The day was tilting toward evening; sunlight slanted through the row of coconut palms,
+      painting long streaks of amber across the still water.
+    notes: "Active verbs in English. Semicolon links two related clauses cleanly."
+
+  - id: example_03_action
+    source: |
+      Hắn rút kiếm, lao về phía trước, không một lời.
+      Đối thủ chưa kịp phản ứng đã ngã xuống.
+    target: |
+      He drew his sword and lunged forward without a word.
+      Before his opponent could react, the man was already on the ground.
+    notes: "Short sentences kept short. 'Lunged' beats 'rushed' for combat feel."
+
+  - id: example_04_internal_thought
+    source: |
+      "Lạ thật," anh thầm nghĩ, "trước đây nàng chưa từng nhìn ta như vậy."
+      Có gì đó đã thay đổi, nhưng anh không thể chỉ rõ là gì.
+    target: |
+      'Strange,' he thought to himself. 'She's never looked at me like that before.'
+      Something had changed, though he couldn't say exactly what.
+    notes: "Single quotes mark internal thought (preferred over italics for readability)."
+
+quality_checks:
+  required_keep:
+    - "Sentence-level meaning"
+    - "Speaker attribution clarity"
+  forbidden_in_output:
+    - "in a way that"
+    - "at this point in time"
+  max_translationese_ratio: 0.04

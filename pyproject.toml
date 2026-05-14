@@ -14,7 +14,22 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Text Processing :: Linguistic",
 ]
-dependencies = []
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "pyahocorasick>=2.0",
+    "typer>=0.12",
+    "google-generativeai>=0.8",
+    "pyyaml>=6.0",
+    "sqlalchemy>=2.0",
+    "aiosqlite>=0.20",
+    "alembic>=1.13",
+    "streamlit>=1.40",
+    "ebooklib>=0.18",
+]
+
+[project.scripts]
+trilex = "trilex.cli.main:_entrypoint"
 
 [project.optional-dependencies]
 dev = [
@@ -40,6 +55,10 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+# Streamlit multipage convention requires "NN_Name.py" filenames
+"src/trilex/ui/pages/*.py" = ["N999"]
+
 [tool.black]
 line-length = 100
 target-version = ["py311"]
@@ -48,7 +67,40 @@ target-version = ["py311"]
 python_version = "3.11"
 strict = true
 warn_unused_configs = true
+exclude = [
+    "src/trilex/ui/pages/",
+    "src/trilex/persistence/migrations/versions/",
+]
+
+[[tool.mypy.overrides]]
+module = ["ahocorasick", "google.*", "yaml", "ebooklib"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["trilex.providers.gemini"]
+disable_error_code = ["dict-item", "arg-type", "attr-defined"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: live API tests; skipped by default. Run with `-m integration`.",
+]
+addopts = "-m 'not integration'"
+
+[tool.coverage.run]
+source = ["src/trilex"]
+omit = [
+    "src/trilex/ui/pages/*",
+    "src/trilex/ui/app.py",
+    "src/trilex/persistence/migrations/env.py",
+    "src/trilex/persistence/migrations/versions/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
